@@ -17,6 +17,9 @@ const applog = require('./applog');
 
 const EXE = process.platform === 'win32' ? 'mcpanel.exe' : 'mcpanel';
 
+// This WebUI's own folder (the one holding package.json).
+const WEBUI_DIR = path.resolve(__dirname, '..');
+
 /**
  * A failure carrying the CLI's error contract: `message` is the ready-to-show
  * text and `code` the stable identifier (`mcpanel api errors` lists them).
@@ -261,18 +264,32 @@ function spawnMcpanel(argv) {
  * Throws the CLI's stderr when it fails with no stdout, matching the Rust
  * command's Result<String, String> contract.
  */
+// Flags whose value must never reach the panel log (`db mysql … -password`).
+// -user too: a password typed into the wrong field would otherwise land here.
+const SECRET_FLAGS = new Set(['-password', '--password', '-user', '--user']);
+
+/** argv joined for logging, with secret flag values masked. */
+function loggableArgv(argv) {
+  return argv
+    .map((a, i) => {
+      if (i > 0 && SECRET_FLAGS.has(argv[i - 1])) return '***';
+      return /^--?(password|user)=/.test(a) ? a.replace(/=.*/, '=***') : a;
+    })
+    .join(' ');
+}
+
 async function runCli(args) {
   const argv = ['api', ...args];
   // Status/file-tree polling happens every few seconds per server and is noise
   // when it's succeeding - only worth a log line when it fails.
   const isFetch = argv[1] === 'fetch';
-  if (!isFetch) applog.info(`run_cli: mcpanel ${argv.join(' ')}`);
+  if (!isFetch) applog.info(`run_cli: mcpanel ${loggableArgv(argv)}`);
 
   const run = await execMcpanel(argv);
   const { stdout, stderr, code } = run;
   if (!stdout && (code !== 0 || run.spawnError)) {
     const err = errorFromRun(run);
-    if (isFetch) applog.error(`run_cli: mcpanel ${argv.join(' ')} failed: ${err.message}`);
+    if (isFetch) applog.error(`run_cli: mcpanel ${loggableArgv(argv)} failed: ${err.message}`);
     else applog.error(`  error [${err.code}]: ${err.message}`);
     throw err;
   }
@@ -331,6 +348,7 @@ module.exports = {
   findCliPath,
   cliProgram,
   cliEnv,
+  WEBUI_DIR,
   execMcpanel,
   execMcpanelWithInput,
   spawnMcpanel,

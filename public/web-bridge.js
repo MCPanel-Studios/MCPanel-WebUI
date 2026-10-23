@@ -139,6 +139,13 @@
     catch { throw _coded(`MCPanel-CLI returned unreadable output: ${String(raw).slice(0, 300)}`, 'cli_bad_output'); }
   }
 
+  // -id / --profile-id for the `plugins …` commands.
+  function _pluginTargetArgs(opts) {
+    if (opts.serverId) return ['-id', opts.serverId];
+    if (opts.profileId) return ['--profile-id', opts.profileId];
+    return [];
+  }
+
   // cli(), but a failure to run the CLI at all also becomes an {error, code}
   // value - for calls whose callers only ever check `.error`.
   async function _cliSafe(args) {
@@ -554,17 +561,33 @@
     try { await _invoke('quit_app'); } catch { /* the server exiting mid-request is expected */ }
     _showStoppedOverlay();
   }
+  // The server relaunches itself; this tab waits for it to answer again and
+  // reloads, which also picks up the new frontend files after an update.
+  async function restartApp() {
+    try { await _invoke('restart_app'); } catch { /* the server exiting mid-request is expected */ }
+    const el = _showStoppedOverlay('Restarting MCPanel-WebUI…');
+    await new Promise(r => setTimeout(r, 1500));
+    for (let i = 0; i < 60; i++) {
+      try {
+        await fetch(location.pathname, { cache: 'no-store' });
+        location.reload();
+        return;
+      } catch { await new Promise(r => setTimeout(r, 1000)); }
+    }
+    el.textContent = 'MCPanel-WebUI did not come back - start it again, then reload this tab.';
+  }
   function startResizeDragging() {
     // The browser owns window resizing.
   }
 
-  function _showStoppedOverlay() {
+  function _showStoppedOverlay(text = 'MCPanel WebUI stopped - you can close this tab.') {
     const el = document.createElement('div');
     el.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;'
       + 'justify-content:center;background:var(--bg-base,#111);color:var(--text-primary,#eee);'
       + 'font-family:var(--font-display,sans-serif);font-size:14px';
-    el.textContent = 'MCPanel WebUI stopped - you can close this tab.';
+    el.textContent = text;
     document.body.appendChild(el);
+    return el;
   }
 
   window.mcpanel = {
@@ -603,6 +626,8 @@
       if (data.profileId) args.push('-profile', data.profileId);
       if (data.storageLimit) args.push('-storage', data.storageLimit);
       if (data.unstableBuilds) args.push('--unstable');
+      if (data.dest) args.push('-dest', data.dest);
+      if (data.heap) args.push('-heap', data.heap);
       const raw = await _invoke('create_server', { args });
       return JSON.parse(raw);
     },
@@ -665,9 +690,13 @@
       return JSON.parse(raw);
     },
 
-    getServerDirStats: async (id) => {
-      const result = await cli(['fetch', 'stats', '-id', id]);
-      return result && typeof result.size === 'number' ? result : { size: 0 };
+    // noSize: skip the disk-usage walk (RAM / CPU / max players only).
+    getServerDirStats: async (id, { noSize = false } = {}) => {
+      const args = ['fetch', 'stats', '-id', id];
+      if (noSize) args.push('--no-size');
+      const result = await cli(args);
+      if (!result || result.error) return noSize ? {} : { size: 0 };
+      return noSize || typeof result.size === 'number' ? result : { ...result, size: 0 };
     },
 
     getProfiles: async () => {
@@ -708,7 +737,15 @@
       extensions: ['*'],
     }),
 
+    // Databases page: `mcpanel api db <args>` (list/tables/rows/update/insert/delete/mysql).
+    db: (args) => _cliSafe(['db', ...args]),
+
     browseFolder: () => _pickPath({ mode: 'folder', title: 'Select Folder' }),
+    // The in-page picker selects one folder at a time; callers add repeatedly.
+    browseFolders: async () => {
+      const p = await _pickPath({ mode: 'folder', title: 'Select Server Folder' });
+      return p ? [p] : [];
+    },
 
     scanServerFolder: (path) =>
       cli(['scan', 'server', '-path', path]),
@@ -779,6 +816,17 @@
     exportServerFiles: (id, relPaths, destDir) =>
       _invoke('export_server_files', { id, relPaths, destDir }),
 
+    // Saves a server file (a folder as .zip) on THIS device, through the
+    // browser's own download - unlike exportServerFiles, which copies on the host.
+    downloadServerPath: (id, relPath) => {
+      const a = document.createElement('a');
+      a.href = `/api/download?id=${encodeURIComponent(id)}&path=${encodeURIComponent(relPath)}`;
+      a.download = '';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    },
+
     updateProfile: (id, data) =>
       _invoke('update_profile', { id, ...data }),
     getProfileFileTree: (id) =>
@@ -814,8 +862,13 @@
       return cli(['create', 'profile-from-server', ...args]);
     },
 
-    duplicateServer: async (id, newName) => {
-      const raw = await _invoke('duplicate_server', { id, newName });
+    // version: switch the copy to another version of the same software;
+    // dest: parent folder for the copy (default: MCPanel's servers folder).
+    duplicateServer: async (id, newName, { version = null, dest = null } = {}) => {
+      const args = ['-id', id, '-t', newName];
+      if (version) args.push('-v', version);
+      if (dest) args.push('-dest', dest);
+      const raw = await _invoke('duplicate_server', { args });
       return JSON.parse(raw);
     },
 
@@ -829,6 +882,12 @@
         priority,
         customIp: customIp || null,
       }),
+
+    unlinkFromProxy: (paperId) =>
+      _invoke('unlink_from_proxy', { paperId }),
+
+    syncProxyPort: (paperId) =>
+      _invoke('sync_proxy_port', { paperId }),
 
     getVelocitySecret: (id) => _invoke('get_velocity_secret', { id }),
 
@@ -871,6 +930,14 @@
         return { current: null, latest: null, hasUpdate: false };
       }
     },
+
+    // Settings → Update buttons: `mcpanel api updateapp -p <webui|cli>` (admin only)
+    updateApp: (product) => _invoke('update_app', { product }),
+
+    // "Restart MCPanel-WebUI" toast button (after an update or an addon change).
+    // getRestartPending: an update the server installed on its own, if any.
+    restartApp,
+    getRestartPending: () => _invoke('get_restart_pending'),
 
     // BuildTools (SpigotMC) - installed/latest build + manual update trigger
     getBuildToolsVersion: () => cli(['buildtools', 'version']),
@@ -951,8 +1018,15 @@
       if (opts.mcVersion) args.push('-v', opts.mcVersion);
       if (opts.owner) args.push('--owner', opts.owner);
       if (opts.versionId) args.push('--version', String(opts.versionId));
+      if (opts.yes) args.push('--yes');
       return cli(args);
     },
+    // The plugins/mods installed through MCPanel (the CLI's .list records).
+    listPlugins: (opts = {}) => cli(['plugins', 'list', ..._pluginTargetArgs(opts)]),
+    uninstallPlugin: (platform, id, opts = {}) =>
+      cli(['plugins', 'uninstall', platform, id, ..._pluginTargetArgs(opts)]),
+    updatePlugin: (platform, id, opts = {}) =>
+      cli(['plugins', 'update', platform, id, ..._pluginTargetArgs(opts)]),
     pluginInfo: (platform, slug, opts = {}) => {
       const args = ['info', 'plugin', platform, slug];
       if (opts.owner) args.push('--owner', opts.owner);

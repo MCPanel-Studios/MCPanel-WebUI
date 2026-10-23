@@ -1,5 +1,6 @@
 /* ═══════════════════════════════════════════════════════════════════════════
-   Velocity proxy link - `proxy_info` / `link_to_proxy` / `get_velocity_secret`.
+   Velocity proxy link - `proxy_info` / `link_to_proxy` / `unlink_from_proxy` /
+   `sync_proxy_port` / `get_velocity_secret`.
 
    Linking and reading the try list are delegated to MCPanel-CLI
    (`mcpanel api proxy info|link`). The link touches velocity.toml,
@@ -50,6 +51,28 @@ async function link_to_proxy({ paperId, velocityId, serverName, priority, custom
     applog.warn(`Proxy link ${paperId} -> ${velocityId} failed [${r.code || 'error'}]: ${r.error}`);
   } else {
     applog.info(`Linked server "${r.serverName}" (${r.address}) to Velocity proxy -id ${velocityId}`);
+  }
+  return r;
+}
+
+async function unlink_from_proxy({ paperId }) {
+  if (!paperId) return { error: 'No server selected', code: 'invalid_arguments' };
+  const r = await runCli(['proxy', 'unlink', '-id', String(paperId)]);
+  if (r && r.error) {
+    applog.warn(`Proxy unlink ${paperId} failed [${r.code || 'error'}]: ${r.error}`);
+  } else {
+    applog.info(`Unlinked server "${r.serverName}" (-id ${paperId}) from Velocity proxy -id ${r.velocityId}`);
+  }
+  return r;
+}
+
+async function sync_proxy_port({ paperId }) {
+  if (!paperId) return { error: 'No server selected', code: 'invalid_arguments' };
+  const r = await runCli(['proxy', 'sync-port', '-id', String(paperId)]);
+  if (r && r.error) {
+    applog.warn(`Proxy port sync ${paperId} failed [${r.code || 'error'}]: ${r.error}`);
+  } else if (r.changed) {
+    applog.info(`Proxy entry "${r.serverName}" moved ${r.oldAddress} -> ${r.address} (-id ${paperId})`);
   }
   return r;
 }
@@ -131,6 +154,8 @@ async function get_velocity_secret({ id }) {
 module.exports = {
   proxy_info,
   link_to_proxy,
+  unlink_from_proxy,
+  sync_proxy_port,
   get_velocity_secret,
 
   // Exported for tests; not dispatchable commands (the RPC registry only ever

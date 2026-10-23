@@ -40,6 +40,8 @@ const p = {
   // WebUI-only: persisted host/port override set from the Settings page, one
   // layer below --host/--port and MCPANEL_WEBUI_HOST/_PORT in server/index.js.
   networkConfigPath: () => path.join(mcpanelHome(), 'network.json'),
+  // WebUI-only: where this WebUI is installed, read by `mcpanel updateapp`.
+  webuiRecordPath: () => path.join(mcpanelHome(), 'webui.json'),
   schedulesPath: () => path.join(mcpanelHome(), 'schedules.json'),
   defaultThemePath: () => path.join(mcpanelHome(), 'default-theme'),
   firstStartFlag: () => path.join(mcpanelHome(), 'debug_first_start'),

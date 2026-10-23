@@ -1,6 +1,7 @@
 /* ═══════════════════════════════════════════════════════════════════════════
    Core commands - CLI health, raw CLI passthrough, config persistence, app
-   metadata, update checks, the in-app CLI installer, and shutdown.
+   metadata, update checks and auto-updates, the in-app CLI installer,
+   shutdown and restart.
 
    Port of the corresponding #[tauri::command] functions in
    src-tauri/src/commands.rs. Command names match the Tauri invoke_handler
@@ -10,7 +11,7 @@
 'use strict';
 
 const fs = require('fs');
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
 
 const paths = require('../paths');
 const applog = require('../applog');
@@ -202,10 +203,12 @@ async function addWindowsScriptsToPath(prog) {
 async function install_cli() {
   let lastErr = '';
 
-  for (const [prog, prefixArgs] of INSTALL_CANDIDATES) {
-    const result = await execCapture(prog, [...prefixArgs, CLI_ZIP_URL]);
+  const attempts = INSTALL_CANDIDATES.flatMap(([prog, prefixArgs]) =>
+    util.githubCandidates(CLI_ZIP_URL).map(zipUrl => [prog, prefixArgs, zipUrl]));
+  for (const [prog, prefixArgs, zipUrl] of attempts) {
+    const result = await execCapture(prog, [...prefixArgs, zipUrl]);
     if (result.ok) {
-      applog.info('install_cli: mcpanel-cli installed from GitHub zip');
+      applog.info(`install_cli: mcpanel-cli installed from ${zipUrl}`);
       if (process.platform === 'win32') {
         try { await addWindowsScriptsToPath(prog); } catch { /* best-effort */ }
       }
@@ -220,9 +223,86 @@ async function install_cli() {
   );
 }
 
-async function quit_app(_args, ctx) {
-  const { state } = ctx;
+// Settings → "Update WebUI" / "Update CLI": `mcpanel api updateapp -p <cli|path>`,
+// the same code path as the terminal command. The WebUI is updated by passing
+// this checkout's own folder as the path.
+async function update_app({ product } = {}, ctx) {
+  if (product !== 'webui' && product !== 'cli') {
+    throw new cli.CliError('Unknown product', 'invalid_arguments');
+  }
+  applog.info(`update_app: updating ${product}`);
+  const r = await runUpdate(product);
+  if (r && r.updated && ctx) markRestartPending(ctx, r.message);
+  return r;
+}
 
+function runUpdate(product) {
+  return cli.runCliJson(['updateapp', '-p', product === 'webui' ? cli.WEBUI_DIR : 'cli']);
+}
+
+// ─── Auto-update ─────────────────────────────────────────────────────────────
+// With Settings → Updates → "Install updates automatically" on, the server
+// itself (not a browser tab - there may be none open, or several) installs new
+// WebUI / CLI releases shortly after boot and then every few hours. It never
+// restarts on its own: running sessions get a "restart required" toast.
+
+const AUTO_UPDATE_FIRST_MS = 60 * 1000;
+const AUTO_UPDATE_EVERY_MS = 6 * 60 * 60 * 1000;
+let autoUpdaterStarted = false;
+
+function autoUpdateEnabled() {
+  try {
+    return JSON.parse(fs.readFileSync(paths.appSettingsPath(), 'utf8')).autoUpdate === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Remembered until the restart, so a tab opened later still gets the toast. */
+function markRestartPending(ctx, reason) {
+  ctx.state.restartPending = { reason: reason || 'An update was installed.', at: Date.now() };
+  ctx.emit('restart-required', ctx.state.restartPending);
+}
+
+async function autoUpdateOnce(ctx) {
+  if (!autoUpdateEnabled()) return;
+  // WebUI first, so the CLI that installs it is still the one that started it.
+  for (const product of ['webui', 'cli']) {
+    try {
+      const r = await runUpdate(product);
+      if (r && r.error) applog.warn(`auto-update: ${product}: ${r.error}`);
+      else if (r && r.updated) {
+        applog.info(`auto-update: ${r.message}`);
+        markRestartPending(ctx, r.message);
+      }
+    } catch (e) {
+      applog.warn(`auto-update: ${product}: ${e.message}`);
+    }
+  }
+}
+
+function __start_autoupdater(_args, ctx) {
+  if (autoUpdaterStarted) return;
+  autoUpdaterStarted = true;
+  let running = false;
+  const tick = async () => {
+    if (running) return;
+    running = true;
+    try { await autoUpdateOnce(ctx); } finally { running = false; }
+  };
+  const first = setTimeout(tick, AUTO_UPDATE_FIRST_MS);
+  const timer = setInterval(tick, AUTO_UPDATE_EVERY_MS);
+  if (first.unref) first.unref();
+  if (timer.unref) timer.unref();
+}
+
+async function get_restart_pending(_args, ctx) {
+  return ctx.state.restartPending || null;
+}
+
+// ─── Quit / restart ──────────────────────────────────────────────────────────
+
+function releaseResources(state) {
   // Cancel any in-progress backup and delete the partial zip - a half-written
   // archive left behind would look like a real restore point.
   if (state.activeBackup) {
@@ -240,12 +320,63 @@ async function quit_app(_args, ctx) {
   state.logStreamers.clear();
 
   try { fs.rmSync(paths.uploadStageDir(), { recursive: true, force: true }); } catch { /* ignore */ }
+}
 
+async function quit_app(_args, ctx) {
+  releaseResources(ctx.state);
   applog.info('quit_app: shutting down');
 
   // Deferred so this invoke's HTTP response still flushes to the browser.
   setTimeout(() => process.exit(0), 150);
 
+  return { success: true };
+}
+
+// Exit code that tells a supervisor this exit is a restart request. systemd
+// (Restart=on-failure or always) and pm2 relaunch the process themselves, so
+// spawning a replacement under them would leave two WebUIs fighting over the
+// port - or one the supervisor kills along with its old main process.
+const RESTART_EXIT_CODE = 75;
+
+function supervised() {
+  if (process.env.MCPANEL_WEBUI_SUPERVISED === '1' || process.env.pm_id !== undefined) return true;
+  // A systemd service's stderr is the journal, which systemd announces as
+  // JOURNAL_STREAM=<dev>:<inode>. Desktop sessions pass the variable down to
+  // terminals too, so it only counts when it really is our stderr (and
+  // INVOCATION_ID can't be used at all - every session scope sets it).
+  const js = process.env.JOURNAL_STREAM;
+  if (!js) return false;
+  try {
+    const st = fs.fstatSync(2);
+    return js === `${st.dev}:${st.ino}`;
+  } catch {
+    return false;
+  }
+}
+
+function relaunch() {
+  if (supervised()) process.exit(RESTART_EXIT_CODE);
+  // Same node, flags, script and arguments. The replacement retries its listen
+  // while this process lets go of the port (see MCPANEL_WEBUI_RELAUNCHED in
+  // index.js). Detached on Unix so it survives this process's group; Windows
+  // doesn't kill children with their parent anyway.
+  const child = spawn(process.execPath, [...process.execArgv, ...process.argv.slice(1)], {
+    cwd: process.cwd(),
+    env: { ...process.env, MCPANEL_WEBUI_RELAUNCHED: '1' },
+    stdio: 'inherit',
+    detached: process.platform !== 'win32',
+    windowsHide: true,
+  });
+  child.unref();
+  process.exit(0);
+}
+
+// The "Restart MCPanel-WebUI" toast button after an update or an addon
+// change. Minecraft servers run under the CLI's supervisor and keep running.
+async function restart_app(_args, ctx) {
+  releaseResources(ctx.state);
+  applog.info('restart_app: restarting');
+  setTimeout(relaunch, 150);
   return { success: true };
 }
 
@@ -258,7 +389,11 @@ module.exports = {
   log_event,
   check_first_start_flag,
   check_app_update,
+  update_app,
   check_cli_update,
   install_cli,
   quit_app,
+  restart_app,
+  get_restart_pending,
+  __start_autoupdater,
 };

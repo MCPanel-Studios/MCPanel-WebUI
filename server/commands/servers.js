@@ -7,7 +7,7 @@
    ping, log tailing) lives here. Most of it delegates to mcpanel-cli; the
    exceptions are the ones the Tauri app also did natively because a CLI
    round-trip would have been too slow or too coarse: update_server,
-   accept_eula, duplicate_server, get_log_since and the log tailer itself.
+   accept_eula, get_log_since and the log tailer itself.
    ═══════════════════════════════════════════════════════════════════════════ */
 
 'use strict';
@@ -104,31 +104,26 @@ async function accept_eula({ id }) {
   return JSON.stringify({ success: true });
 }
 
-async function duplicate_server({ id, newName }, ctx) {
+// Goes through the CLI (`duplicate server`) rather than copying here: a clone
+// can switch version (downloading a new jar) and live in another folder, and
+// the CLI already owns that logic plus the cleanup when it fails half-way.
+async function duplicate_server({ args }, ctx) {
   const emit = (ctx && ctx.emit) || events.emit;
-  emit('download-progress', { id: '__dup__', progress: 0, status: 'Copying server files…' });
+  const argsList = Array.isArray(args) ? args.map(String) : [];
+  const switchesVersion = argsList.some(a => a === '-v' || a === '--version');
+  const statusMsg = switchesVersion ? 'Copying files & downloading new version…' : 'Copying server files…';
 
-  const cfg = util.readConfig();
-  const src = (Array.isArray(cfg.servers) ? cfg.servers : []).find(s => s && s.id === id);
-  if (!src) throw new Error('Server not found');
-  if (!src.dir) throw new Error('No dir');
+  emit('download-progress', { id: '__dup__', progress: 5, status: statusMsg });
 
-  const nowMs = Date.now();
-  const newId = `srv_${nowMs}`;
-  const newDir = path.join(paths.serversDir(), newId);
+  const argv = ['api', 'duplicate', 'server', ...argsList];
+  applog.info(`duplicate_server: mcpanel ${argv.join(' ')}`);
 
-  fs.mkdirSync(newDir, { recursive: true });
-  util.copyDirAll(src.dir, newDir);
+  const { stdout, stderr, code } = await runWithProgress(argv, emit, {
+    id: '__dup__', status: statusMsg, everyMs: 1500, step: 10, cap: 88,
+  }, '__dup__');
 
-  const newSrv = { ...src, id: newId, name: newName, dir: newDir, created: nowMs };
-
-  if (!Array.isArray(cfg.servers)) throw new Error('No servers array');
-  cfg.servers.push(newSrv);
-  util.writeConfig(cfg);
-  util.writeServerManifest(newSrv);
-
-  emit('download-progress', { id: newId, progress: 100, status: 'Done!' });
-  return JSON.stringify({ success: true, server: newSrv });
+  if (!stdout && code !== 0) throw new Error(stderr || `mcpanel exited with code ${code}`);
+  return stdout;
 }
 
 /**

@@ -77,6 +77,8 @@ const MAP = {
   delete_server_file: 'files.delete',
   upload_files_to_server: 'files.upload',
   export_server_files: 'files.download',
+  // GET /api/download (server/index.js), not an RPC command.
+  download_server_file: 'files.download',
 
   update_profile: 'profiles.manage',
   get_profile_file_tree: 'files.read',
@@ -101,6 +103,8 @@ const MAP = {
 
   proxy_info: 'proxy.manage',
   link_to_proxy: 'proxy.manage',
+  unlink_from_proxy: 'proxy.manage',
+  sync_proxy_port: 'proxy.manage',
   get_velocity_secret: 'proxy.manage',   // reveals the forwarding secret
 
   get_system_stats: 'system.view',
@@ -150,6 +154,10 @@ const MAP = {
   quit_app: DENY,
   shutdown_all_servers: DENY,
   install_cli: DENY,
+  update_app: DENY,                 // installs a new WebUI / CLI on the host
+  restart_app: DENY,                // restarts the panel for everyone
+  get_restart_pending: DENY,        // only admins can act on it
+  __start_autoupdater: DENY,        // internal boot hook, never client-reachable
   __start_scheduler: DENY,          // internal boot hook, never client-reachable
 
   // ── CLI passthrough ─────────────────────────────────────────────────────
@@ -234,11 +242,39 @@ const CLI_MAP = {
   'search mods': 'plugins.view',
   'install plugin': 'plugins.install',
   'install mod': 'plugins.install',
+  // The ones installed through MCPanel (.list records). Uninstalling only ever
+  // deletes a jar MCPanel itself installed, so it rides on plugins.install.
+  'plugins list': 'plugins.view',
+  'plugins uninstall': 'plugins.install',
+  'plugins update': 'plugins.install',
+  'mods list': 'plugins.view',
+  'mods uninstall': 'plugins.install',
+  'mods update': 'plugins.install',
 
   'backup list': 'backups.view',
   'backup create': 'backups.create',
   'backup restore': 'backups.restore',
   'backup delete': 'backups.delete',
+
+  // The built-in SQLite editor (.db files in a server's folder).
+  'db tables': 'databases.view',
+  'db rows': 'databases.view',
+  'db update': 'databases.edit',
+  'db insert': 'databases.edit',
+  'db delete': 'databases.edit',
+
+  // The MCPanel-Databases addon's Databases page (MySQL / MariaDB). Saved
+  // accounts are install-wide, so managing them is a settings change.
+  'databases list': 'databases.view',
+  'databases tables': 'databases.view',
+  'databases rows': 'databases.view',
+  'databases update': 'databases.edit',
+  'databases insert': 'databases.edit',
+  'databases delete': 'databases.edit',
+  'databases create': 'databases.manage',
+  'databases alter': 'databases.manage',
+  'databases drop': 'databases.manage',
+  'databases account': 'settings.manage',
 
   'proxy info': 'proxy.manage',
   'proxy link': 'proxy.manage',
@@ -258,6 +294,8 @@ const CLI_MAP = {
   'addons ui': null,
   // Installing/updating addons runs third-party code on the host.
   'mclib': DENY,
+  // downloads and installs new MCPanel / WebUI / CLI releases on the host
+  'updateapp': DENY,
 
   // stops every server on the host
   'shutdown': DENY,
@@ -323,11 +361,22 @@ function wantsLink(argv) {
   return Array.isArray(argv) && argv.some(a => a === '--link');
 }
 
+// `-dest` puts a new/cloned server in any folder on the HOST - the same
+// reach as --link, so the same rule: the default location is servers.create /
+// servers.duplicate, a custom one is admin-only. The CLI parser rejects
+// abbreviated flags, so the exact spellings (and the --dest=x form) are all
+// there is to catch.
+function wantsDest(argv) {
+  return Array.isArray(argv) && argv.some(a =>
+    a === '-dest' || a === '--dest' || (typeof a === 'string' && /^--?dest=/.test(a)));
+}
+
 function requiredPermission(cmd, args) {
   if (!Object.prototype.hasOwnProperty.call(MAP, cmd)) return DENY;
   const req = MAP[cmd];
   const argv = args && args.args;
   if ((cmd === 'import_server_cmd' || req === '__RUN_CLI__') && wantsLink(argv)) return DENY;
+  if ((cmd === 'create_server' || cmd === 'duplicate_server' || req === '__RUN_CLI__') && wantsDest(argv)) return DENY;
   if (req === '__RUN_CLI__') return cliPermission(argv);
   return req;
 }

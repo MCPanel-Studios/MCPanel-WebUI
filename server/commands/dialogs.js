@@ -30,13 +30,52 @@ function windowsDrives() {
   return drives;
 }
 
+// Mount points that are part of the OS install rather than "another drive".
+const SYSTEM_MOUNTS = new Set(['/', '/home', '/root', '/usr', '/var', '/opt', '/tmp', '/srv/tmp']);
+const SKIP_MOUNT_PREFIXES = ['/boot', '/proc', '/sys', '/dev', '/run/user', '/snap', '/var/lib/', '/var/snap'];
+const NETWORK_FS = new Set(['nfs', 'nfs4', 'cifs', 'smb3', 'smbfs', 'fuse.sshfs', 'fuse.rclone', '9p', 'virtiofs']);
+const READONLY_FS = new Set(['squashfs', 'iso9660', 'udf']);
+
+/**
+ * Extra drives a server could live on: USB disks under /run/media, NAS shares,
+ * second SSDs in /mnt, ... On Linux that's every real (block-device or
+ * network) mount that isn't a system one; on macOS, /Volumes.
+ */
+function mountRoots() {
+  if (process.platform === 'darwin') {
+    try {
+      return fs.readdirSync('/Volumes', { withFileTypes: true })
+        .filter(d => d.isDirectory() || d.isSymbolicLink())
+        .map(d => ({ name: d.name, path: path.join('/Volumes', d.name) }))
+        .filter(r => { try { return fs.realpathSync(r.path) !== '/'; } catch { return false; } });
+    } catch { return []; }
+  }
+  if (process.platform !== 'linux') return [];
+  let lines;
+  try { lines = fs.readFileSync('/proc/mounts', 'utf8').split('\n'); }
+  catch { return []; }
+  // /proc/mounts escapes spaces & co. as \040-style octal.
+  const unescape = s => s.replace(/\\([0-7]{3})/g, (_, o) => String.fromCharCode(parseInt(o, 8)));
+  const out = [];
+  for (const line of lines) {
+    const [dev, rawMnt, type] = line.split(' ');
+    if (!rawMnt || READONLY_FS.has(type)) continue;
+    if (!dev.startsWith('/dev/') && !NETWORK_FS.has(type)) continue;
+    const mnt = unescape(rawMnt);
+    if (SYSTEM_MOUNTS.has(mnt)) continue;
+    if (SKIP_MOUNT_PREFIXES.some(p => mnt === p || mnt.startsWith(p.endsWith('/') ? p : `${p}/`))) continue;
+    out.push({ name: path.basename(mnt) || mnt, path: mnt });
+  }
+  return out;
+}
+
 function quickRoots() {
   const roots = [
     { name: 'Home', path: os.homedir() },
     { name: 'MCPanel', path: paths.home() },
   ];
   if (process.platform === 'win32') roots.push(...windowsDrives());
-  else roots.push({ name: 'Filesystem', path: '/' });
+  else roots.push({ name: 'Filesystem', path: '/' }, ...mountRoots());
 
   // paths.home() sits under the home directory on Linux, so the two can
   // collapse into one entry on an unusual MCPANEL_HOME.

@@ -52,6 +52,14 @@
     else console.log(`[addons] ${type}: ${msg}`);
   }
 
+  // Installing, updating or removing an addon only fully applies after a
+  // restart (its CLI side and its UI script both load at startup), so these
+  // get the app's sticky "restart" toast instead of a plain one.
+  function restartMsg(msg) {
+    if (typeof window.promptRestart === 'function') window.promptRestart(msg);
+    else toastMsg(msg, 'success');
+  }
+
   function safeId(id) {
     const s = String(id || '').toLowerCase().replace(/[^a-z0-9_-]/g, '-');
     if (!s) throw new Error('an id is required');
@@ -257,10 +265,25 @@
       render: (body) => renderShell(body),
       onShow: () => refresh(),
     }, { beforeSettings: true });
-    view.actions.innerHTML = `<button class="btn-ghost" data-mcl="refresh">Refresh</button>`;
-    view.actions.addEventListener('click', () => refresh());
+    view.actions.innerHTML = `
+      <button class="btn-ghost" data-mcl="refresh">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-2.64-6.36L21 8"/><path d="M21 3v5h-5"/></svg>
+        Refresh
+      </button>
+      <button class="btn-primary" data-mcl="new-addon">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
+        New Addon
+      </button>`;
+    view.actions.addEventListener('click', (e) => {
+      const act = e.target.closest('[data-mcl]')?.dataset.mcl;
+      if (act === 'refresh') refresh();
+      // Listing in MCLib goes through its "Submit an addon" issue form.
+      else if (act === 'new-addon') api.openExternal(MCLIB_SUBMIT_URL);
+    });
     buildDisclaimerModal();
   }
+
+  const MCLIB_SUBMIT_URL = 'https://github.com/DippyCoder/MCLib/issues/new?template=submit-addon.yml';
 
   function renderShell(body) {
     body.innerHTML = `
@@ -384,7 +407,8 @@
     if (act === 'enable' || act === 'disable' || act === 'uninstall') {
       const r = await api.cli(['addons', act === 'uninstall' ? 'remove' : act, name]);
       if (r.error) api.toast(r.error, 'error');
-      else api.toast(act === 'uninstall' ? `Removed ${name}` : `${name} ${act}d — reload to apply UI changes`, 'success');
+      else if (act === 'uninstall') restartMsg(`Removed ${name}`);
+      else api.toast(`${name} ${act}d - reload to apply UI changes`, 'success');
       refresh();
     }
   }
@@ -426,6 +450,7 @@
         <div class="modal-body">
           <div class="mcl-disclaimer" data-mcl="disclaimer"></div>
           <p style="margin-top:12px;font-size:12px"><a data-mcl="tos" style="color:var(--accent);cursor:pointer">Read the library's terms</a></p>
+          <label class="checkbox-item" style="display:inline-flex;margin-top:4px"><input type="checkbox" data-mcl="skip"> Don't show this again</label>
           <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
             <button class="btn-ghost" data-mcl="decline">Cancel</button>
             <button class="btn-primary" data-mcl="accept">Accept and install</button>
@@ -441,9 +466,17 @@
     const tos = modal.querySelector('[data-mcl="tos"]');
     tos.style.display = doc.tos ? '' : 'none';
     tos.onclick = () => doc.tos && api.openExternal(doc.tos);
+    const skip = modal.querySelector('[data-mcl="skip"]');
+    skip.checked = false;
     modal.classList.remove('hidden');
     return new Promise((resolve) => {
-      const done = (v) => { modal.classList.add('hidden'); resolve(v); };
+      const done = (v) => {
+        modal.classList.add('hidden');
+        // Accepting snoozes the disclaimer for 15 minutes, the checkbox hides
+        // it for good (app.js keeps that state, shared with plugins/mods).
+        if (v && typeof rememberDisclaimer === 'function') rememberDisclaimer('addons', skip.checked);
+        resolve(v);
+      };
       modal.querySelector('[data-mcl="accept"]').onclick = () => done(true);
       modal.querySelector('[data-mcl="decline"]').onclick = () => done(false);
     });
@@ -455,7 +488,8 @@
     btn.textContent = 'Working…';
     try {
       const base = ['mclib', state.library, ...args.filter(Boolean)];
-      let r = await api.cli(base);
+      const snoozed = typeof disclaimerSuppressed === 'function' && disclaimerSuppressed('addons');
+      let r = await api.cli(snoozed ? [...base, '--yes'] : base);
       if (r && r.code === 'disclaimer_required') {
         if (!(await askDisclaimer(r))) return;
         btn.textContent = 'Installing…';
@@ -463,12 +497,11 @@
       }
       if (r.error) { api.toast(r.error, 'error'); return; }
       if (r.unchanged) api.toast(r.message || 'Already up to date', 'info');
-      else if (args[0] === 'remove') api.toast(`Removed ${r.name}`, 'success');
+      else if (args[0] === 'remove') restartMsg(`Removed ${r.name}`);
       else {
-        const ui = (r.products || []).includes(product);
-        api.toast(`${r.name} ${r.version} installed${ui ? ' — reload the panel to load its UI' : ''}`, 'success');
+        restartMsg(`${r.name} ${r.version} installed`);
         if (r.addon && r.addon.status && r.addon.status !== 'loaded') {
-          api.toast(`${r.name} was installed but reports "${r.addon.status}" — see the Installed tab`, 'error');
+          api.toast(`${r.name} was installed but reports "${r.addon.status}" - see the Installed tab`, 'error');
         }
       }
       refresh();

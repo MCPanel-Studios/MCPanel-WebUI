@@ -13,6 +13,8 @@
 
 An open-source Minecraft server webpanel inspired by [MCPanel](https://mcpanel.dippycoder.xyz) built with NodeJS and backed by [mcpanel-cli](https://github.com/DippyCoder/MCPanel-CLI).
 
+>**Note:** MCPanel-WebUI and all MCPanel related repositorys will be at [MCPanel-Studios](https://github.com/MCPanel-Studios) soon!
+
 This is not a re-skin or a rewrite. The browser loads the **exact same** `index.html`, `style.css`, and `app.js` the desktop app ships. The only file swapped out is the bridge underneath them:
 
 | Desktop | WebUI |
@@ -43,7 +45,7 @@ Full parity with the desktop app:
 - **JDK detection** - scan for installed JDKs and check per-version build compatibility
 - **System stats** - live RAM and CPU readout in the sidebar
 - **Embedded terminal** - a real shell in the MCPanel data directory, in-app
-- **Update checks** - notifies you when a new MCPanel or `mcpanel-cli` release is out
+- **Update checks** - notifies you when a new MCPanel or `mcpanel-cli` release is out; **Settings → Updates → Install updates automatically** makes the server install new MCPanel-WebUI and MCPanel-CLI releases shortly after it starts and every 6 hours. After an update, or after installing, updating or removing an addon, administrators get a toast that restarts the WebUI for them (servers keep running)
 - **App settings** - titlebar icon colour, UI and monospace font pickers, background behaviour
 - **Diagnostic log** - MCPanel's own rotating log, separate from each server's console
 - **Theme system** - install, browse, and swap themes live; ships with **Purple Dark**, **Clean Dark**, **Dark Slate**, and **Bright Slate**
@@ -247,8 +249,9 @@ Themes are **fully interchangeable between MCPanel and MCPanel-WebUI**. A theme 
 
 - Themes live in `~/.config/mcpanel/themes/<id>/` (or the platform equivalent) - the **same directory** the desktop app uses, so a theme installed on either side is immediately available to the other
 - Same package format: a `theme.json` manifest plus a `theme.css`, distributed as a `.zip`
-- The browse-and-install index is fetched from the **same URL** the desktop app uses:
-  `https://raw.githubusercontent.com/DippyCoder/MCPanel/themes/themes-index.json`
+- The browse-and-install list is fetched from the **same two indexes** the desktop app uses, and merged:
+  - official themes: `https://raw.githubusercontent.com/DippyCoder/MCPanel/themes/themes-index.json`
+  - MCLib community themes (marked *MCLib*): `https://raw.githubusercontent.com/DippyCoder/MCLib/main/themes-index.json` (each theme installs from its own repository's newest release)
 - The four builtins ship identically: **Purple Dark**, **Clean Dark**, **Dark Slate**, **Bright Slate**
 
 | Method | Steps |
@@ -259,7 +262,7 @@ Themes are **fully interchangeable between MCPanel and MCPanel-WebUI**. A theme 
 
 **One internal difference, invisible to theme authors:** a `theme.css` can reference its own bundled assets with a relative `url(...)`. The desktop app rewrites those to absolute `file://` paths; a browser can't load `file://`, so the WebUI rewrites them to `/api/theme-asset/<id>/<path>` instead, served straight out of the theme's own directory. Absolute `http://`, `https://`, and `data:` URLs are left untouched in both. Nothing in the theme package changes - you write the same relative paths either way.
 
-Community themes and authoring docs: [`themes` branch](https://github.com/DippyCoder/MCPanel/tree/themes)
+Official themes: [MCPanel `themes` branch](https://github.com/DippyCoder/MCPanel/tree/themes) · Community themes, authoring docs and submissions: [MCLib](https://github.com/DippyCoder/MCLib#themes)
 
 ---
 
@@ -301,6 +304,10 @@ MCPanel-WebUI/
 `server/cli.js` resolves the CLI by looking for the Python console script at known pip/pipx install locations rather than trusting `PATH` - on Linux the desktop app's own binary is also called `mcpanel`, so a bare `PATH` lookup can find the wrong thing.
 
 ---
+
+## Restarting
+
+The restart button relaunches the WebUI with the same Node, script and arguments, then reloads the page once it answers again. Run under a supervisor, the WebUI instead exits with code **75** and lets the supervisor start it again - pm2 is detected on its own, and so is a systemd service (its stderr is the journal). Give the unit `Restart=on-failure` (or `always`) so that exit brings it back; for any other supervisor, set `MCPANEL_WEBUI_SUPERVISED=1`.
 
 ## Notes
 

@@ -70,25 +70,6 @@ function assertSafeRel(rel, label = 'path') {
 }
 
 /**
- * Skips profile.json and mcpanel.json - matches mcpanel-cli's util.copy_dir.
- * The manifest is skipped so a duplicate gets its own fresh one instead of
- * inheriting the source's id.
- */
-function copyDirAll(src, dst) {
-  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-    if (entry.name === 'profile.json' || entry.name === 'mcpanel.json') continue;
-    const destPath = path.join(dst, entry.name);
-    const srcPath = path.join(src, entry.name);
-    if (entry.isDirectory()) {
-      fs.mkdirSync(destPath, { recursive: true });
-      copyDirAll(srcPath, destPath);
-    } else {
-      fs.copyFileSync(srcPath, destPath);
-    }
-  }
-}
-
-/**
  * Copies a single dropped path into dst, recursing into directories so a
  * dragged folder (and its contents) lands intact rather than being skipped.
  */
@@ -148,9 +129,13 @@ function walkDirTree(dir, base) {
     return [];
   }
   items.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  // plugins/.list and mods/.list hold mcpanel-cli's install records - hidden
+  // from the file manager like the CLI's own server tree does.
+  const hideList = ['plugins', 'mods'].includes(path.basename(dir));
 
   const entries = [];
   for (const item of items) {
+    if (hideList && item.name === '.list') continue;
     const full = path.join(dir, item.name);
     let meta;
     try { meta = fs.statSync(full); } catch { continue; }
@@ -165,33 +150,58 @@ function walkDirTree(dir, base) {
 }
 
 /** Fetches JSON with a timeout, resolving null on any failure (mirrors curl -fsSL). */
+// The MCPanel repositories are moving from the DippyCoder account to the
+// MCPanel-Studios organisation. Every GitHub URL under the old owner is tried
+// at the organisation first and only then at its old path.
+const GITHUB_ORG = 'MCPanel-Studios';
+const OLD_OWNER_RE =
+  /^(https:\/\/(?:api\.github\.com\/repos|github\.com|raw\.githubusercontent\.com|gist\.githubusercontent\.com)\/)DippyCoder\//i;
+
+/** [organisation URL, old URL] for a DippyCoder GitHub URL, else [url]. */
+function githubCandidates(url) {
+  const moved = String(url).replace(OLD_OWNER_RE, `$1${GITHUB_ORG}/`);
+  return moved !== url ? [moved, url] : [url];
+}
+
+/**
+ * fetch() over githubCandidates(url): the first response that is ok, or null
+ * if none is (network errors and timeouts included).
+ */
+async function fetchWithFallback(url, { timeout = 10000, ...init } = {}) {
+  for (const candidate of githubCandidates(url)) {
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), timeout);
+    try {
+      const res = await fetch(candidate, { ...init, signal: ac.signal });
+      // Read the body before the timer is cleared so a stalled transfer still aborts.
+      if (res.ok) return { res, body: Buffer.from(await res.arrayBuffer()) };
+    } catch {
+      // try the next candidate
+    } finally {
+      clearTimeout(t);
+    }
+  }
+  return null;
+}
+
 async function fetchJson(url, { timeout = 10000, headers = {} } = {}) {
-  const ac = new AbortController();
-  const t = setTimeout(() => ac.abort(), timeout);
+  const got = await fetchWithFallback(url, { timeout, headers });
+  if (!got) return null;
   try {
-    const res = await fetch(url, { signal: ac.signal, headers });
-    if (!res.ok) return null;
-    return await res.json();
+    return JSON.parse(got.body.toString('utf8'));
   } catch {
     return null;
-  } finally {
-    clearTimeout(t);
   }
 }
 
 async function downloadTo(url, dest, { timeout = 60000 } = {}) {
-  const ac = new AbortController();
-  const t = setTimeout(() => ac.abort(), timeout);
+  const got = await fetchWithFallback(url, { timeout, redirect: 'follow' });
+  if (!got) return false;
   try {
-    const res = await fetch(url, { signal: ac.signal, redirect: 'follow' });
-    if (!res.ok) return false;
-    const buf = Buffer.from(await res.arrayBuffer());
-    await fsp.writeFile(dest, buf);
+    await fsp.writeFile(dest, got.body);
     return true;
   } catch {
     return false;
-  } finally {
-    clearTimeout(t);
   }
 }
 
@@ -219,11 +229,12 @@ module.exports = {
   getProfileDir,
   writeServerManifest,
   assertSafeRel,
-  copyDirAll,
   copyDroppedPath,
   uniqueExportPath,
   exportPaths,
   walkDirTree,
+  githubCandidates,
+  fetchWithFallback,
   fetchJson,
   downloadTo,
   lanAddresses,

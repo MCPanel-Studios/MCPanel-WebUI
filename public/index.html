@@ -7,8 +7,44 @@
 <link rel="icon" href="assets/icons/icon.png">
 <link rel="stylesheet" href="style.css">
 <style id="theme-override"></style>
+<!-- Startup loading screen: inline so it paints before style.css/theme/data -->
+<meta name="color-scheme" content="dark">
+<style>
+  html { background: var(--loader-bg, #0d0d14); }
+  #app-loader {
+    position: fixed; inset: 0; z-index: 100000;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px;
+    background: var(--loader-bg, #0d0d14); color: var(--loader-fg, #a1a1b5);
+    font: 500 13px/1.4 system-ui, sans-serif; letter-spacing: .02em;
+    transition: opacity .1s ease, visibility .1s ease;
+  }
+  #app-loader.done { opacity: 0; visibility: hidden; pointer-events: none; }
+  #app-loader img { width: 64px; height: 64px; object-fit: contain; border-radius: 14px; animation: app-loader-pulse 1.6s ease-in-out infinite; }
+  #app-loader .app-loader-bar { width: 140px; height: 3px; border-radius: 3px; overflow: hidden; background: rgba(127,127,127,.18); }
+  #app-loader .app-loader-bar::after {
+    content: ''; display: block; width: 40%; height: 100%; border-radius: 3px;
+    background: var(--loader-accent, #a855f7); animation: app-loader-slide 1.1s ease-in-out infinite;
+  }
+  @keyframes app-loader-pulse { 0%,100% { transform: scale(1); opacity: 1 } 50% { transform: scale(.94); opacity: .8 } }
+  @keyframes app-loader-slide { 0% { transform: translateX(-100%) } 100% { transform: translateX(250%) } }
+  @media (prefers-reduced-motion: reduce) { #app-loader img, #app-loader .app-loader-bar::after { animation: none; } }
+</style>
+<script>
+  // Tint the loader with the last-used theme's colours (saved by hideAppLoader).
+  try {
+    const c = JSON.parse(localStorage.getItem('mcpanel-loader-colors') || 'null');
+    if (c) for (const k of ['bg', 'fg', 'accent']) if (c[k]) document.documentElement.style.setProperty('--loader-' + k, c[k]);
+  } catch (_) {}
+</script>
 </head>
 <body>
+
+<!-- Startup loading screen (hidden by hideAppLoader() in app.js) -->
+<div id="app-loader">
+  <img src="assets/icon.png" alt="">
+  <div class="app-loader-bar"></div>
+  <span>Loading MCPanel-WebUI…</span>
+</div>
 
 <!-- CLI missing banner (hidden by default, shown by web-bridge.js) -->
 <div id="cli-missing-banner" class="hidden" style="
@@ -537,6 +573,7 @@
                   <button class="plugin-provider-tab active" id="sprovider-hangar" onclick="switchPluginProvider('hangar','server')">Hangar</button>
                   <button class="plugin-provider-tab" id="sprovider-modrinth" onclick="switchPluginProvider('modrinth','server')">Modrinth</button>
                   <button class="plugin-provider-tab" id="sprovider-spigotmc" onclick="switchPluginProvider('spigotmc','server')">SpigotMC</button>
+                  <button class="plugin-provider-tab plugin-provider-installed" id="sprovider-installed" onclick="switchPluginProvider('installed','server')">Installed</button>
                 </div>
                 <div class="plugin-search-wrap">
                   <input type="text" id="server-plugin-search" class="plugin-search-input" placeholder="Search..."
@@ -576,7 +613,12 @@
                       <option value="16G">16 GB</option>
                       <option value="custom">Custom...</option>
                     </select>
-                    <input type="text" id="tsett-ram-custom" class="input" placeholder="e.g. 3G, 2048M" style="display:none;margin-top:6px">
+                    <input type="text" id="tsett-ram-custom" class="input" placeholder="e.g. 3G, 2048M" style="display:none;margin-top:6px" oninput="updateHeapPlaceholder('tsett')">
+                  </div>
+                  <div class="form-group">
+                    <label>Heap Limit <span class="label-hint">(optional)</span></label>
+                    <input type="text" id="tsett-heap" class="input" placeholder="Auto">
+                    <div class="field-hint">Java's share of the RAM allocation. Empty = picked automatically, leaving room for Java's own memory.</div>
                   </div>
                   <div class="form-group">
                     <label>Storage Limit <span class="label-hint">(optional)</span></label>
@@ -609,6 +651,27 @@
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right:6px"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
                     Link to Velocity Proxy
                   </button>
+                  <button class="btn-ghost danger hidden" id="tsett-proxy-unlink-btn" style="width:100%;justify-content:center" onclick="unlinkFromVelocityProxy(this)">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right:6px"><path d="M18.84 12.25l1.72-1.71a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M5.17 11.75l-1.71 1.71a5 5 0 0 0 7.07 7.07l1.71-1.71"/><path d="M8 2v3M2 8h3M16 22v-3M22 16h-3"/></svg>
+                    Unlink from Velocity Proxy
+                  </button>
+                </div>
+                <div class="server-tools" style="margin-top:24px">
+                  <div class="server-tools-title">Tools</div>
+                  <div class="tool-row">
+                    <div>
+                      <div class="tool-label">Clone Server</div>
+                      <div class="tool-desc">Copy this server with all its files - optionally to another location or version.</div>
+                    </div>
+                    <button class="btn-sm" onclick="openDuplicateServerModal()">Clone</button>
+                  </div>
+                  <div class="tool-row">
+                    <div>
+                      <div class="tool-label">Create Profile from Server</div>
+                      <div class="tool-desc">Save selected files as a reusable profile preset.</div>
+                    </div>
+                    <button class="btn-sm" onclick="openCreateProfileFromServerModal()">Create Profile</button>
+                  </div>
                 </div>
                 <div class="danger-zone" style="margin-top:24px">
                   <div class="danger-zone-title">Danger Zone</div>
@@ -770,6 +833,26 @@
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="11" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                 Copy Forwarding Secret
               </button>
+            </div>
+          </div>
+
+          <!-- Velocity link (shown only for servers linked to a proxy) -->
+          <div class="card hidden" id="proxy-link-card">
+            <div class="card-header"><div class="card-title">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+              Velocity Proxy
+            </div></div>
+            <div class="action-list">
+              <div class="proxy-link-row">
+                <button class="action-item" id="proxy-link-open" onclick="openLinkedProxy()">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+                  <span class="proxy-link-name" id="proxy-link-name"></span>
+                  <span class="proxy-link-as" id="proxy-link-as"></span>
+                </button>
+                <button class="proxy-unlink-btn" title="Unlink from proxy" onclick="unlinkFromVelocityProxy(this)">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
+              </div>
             </div>
           </div>
 
@@ -968,6 +1051,7 @@
                   <button class="plugin-provider-tab active" id="pprovider-hangar" onclick="switchPluginProvider('hangar','profile')">Hangar</button>
                   <button class="plugin-provider-tab" id="pprovider-modrinth" onclick="switchPluginProvider('modrinth','profile')">Modrinth</button>
                   <button class="plugin-provider-tab" id="pprovider-spigotmc" onclick="switchPluginProvider('spigotmc','profile')">SpigotMC</button>
+                  <button class="plugin-provider-tab plugin-provider-installed" id="pprovider-installed" onclick="switchPluginProvider('installed','profile')">Installed</button>
                 </div>
                 <div class="plugin-search-wrap">
                   <input type="text" id="profile-plugin-search" class="plugin-search-input" placeholder="Search..."
@@ -1072,7 +1156,25 @@
           <p class="page-subtitle">Configure MCPanel-WebUI</p>
         </div>
       </div>
-      <div class="settings-layout">
+      <div class="detail-tab-bar settings-tab-bar">
+        <button class="detail-tab active" id="stab-general" onclick="switchSettingsTab('general')">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
+          General
+        </button>
+        <button class="detail-tab" id="stab-updates" onclick="switchSettingsTab('updates')">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
+          Updates
+        </button>
+        <button class="detail-tab" id="stab-appearance" onclick="switchSettingsTab('appearance')">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="13.5" cy="6.5" r="1.5"/><circle cx="17.5" cy="10.5" r="1.5"/><circle cx="8.5" cy="7.5" r="1.5"/><circle cx="6.5" cy="12.5" r="1.5"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.93 0 1.5-.75 1.5-1.5 0-.39-.15-.74-.39-1.01-.24-.27-.38-.62-.38-1 0-.83.67-1.5 1.5-1.5H16c3.31 0 6-2.69 6-6 0-4.96-4.48-9-10-9z"/></svg>
+          Appearance
+        </button>
+        <button class="detail-tab" id="stab-about" onclick="switchSettingsTab('about')">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+          About
+        </button>
+      </div>
+      <div class="settings-layout" id="spane-general">
         <div class="settings-section">
           <h3>Behavior</h3>
           <div class="setting-row">
@@ -1135,42 +1237,6 @@
           <div id="jdk-list" class="jdk-list"></div>
         </div>
         <div class="settings-section">
-          <h3>Updates</h3>
-          <p class="section-desc">Check for new MCPanel-WebUI and MCPanel-CLI releases</p>
-          <div style="display:flex;flex-direction:column;gap:8px">
-            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-              <button class="btn-sm" onclick="checkForUpdates()">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
-                Check for Updates
-              </button>
-              <button class="btn-sm" onclick="checkForCliUpdates()">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
-                Check for CLI Updates
-              </button>
-            </div>
-            <div style="display:flex;flex-direction:column;gap:4px">
-              <span id="update-status-text" style="font-size:12px;color:var(--text-muted)">MCPanel-WebUI: -</span>
-              <span id="cli-update-status-text" style="font-size:12px;color:var(--text-muted)">MCPanel-CLI: -</span>
-            </div>
-          </div>
-        </div>
-        <div class="settings-section">
-          <h3>BuildTools</h3>
-          <p class="section-desc">SpigotMC BuildTools.jar, used to compile Spigot servers locally</p>
-          <div style="display:flex;flex-direction:column;gap:8px">
-            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-              <button class="btn-sm" onclick="checkBuildToolsVersion()">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
-                Check BuildTools Version
-              </button>
-              <button class="btn-sm" id="buildtools-update-btn" onclick="updateBuildToolsNow()">
-                Update Now
-              </button>
-            </div>
-            <span id="buildtools-status-text" style="font-size:12px;color:var(--text-muted)">BuildTools: -</span>
-          </div>
-        </div>
-        <div class="settings-section">
           <h3>Logs</h3>
           <p class="section-desc">MCPanel-WebUI's own diagnostic log (CLI errors, install steps) - separate from each server's console log. The newest file is always latest.log.</p>
           <div class="setting-row">
@@ -1190,6 +1256,72 @@
             </div>
           </div>
         </div>
+      </div>
+      <div class="settings-layout hidden" id="spane-updates">
+        <div class="settings-section">
+          <h3>Updates</h3>
+          <p class="section-desc">Check for new MCPanel-WebUI and MCPanel-CLI releases</p>
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <div class="setting-label">Install updates automatically</div>
+              <div class="setting-desc">The WebUI server checks shortly after it starts and every 6 hours, installs new MCPanel-WebUI and MCPanel-CLI releases on its own, then asks administrators to restart it.</div>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" id="setting-auto-update" onchange="saveAutoUpdate()">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <div style="display:flex;gap:10px;flex-wrap:wrap">
+              <div style="display:flex;flex-direction:column;gap:6px">
+                <button class="btn-sm" onclick="checkForUpdates()">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
+                  Check for Updates
+                </button>
+                <button class="btn-sm" id="update-app-btn-webui" onclick="updateAppNow('webui')">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
+                  Update WebUI
+                </button>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:6px">
+                <button class="btn-sm" onclick="checkForCliUpdates()">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
+                  Check for CLI Updates
+                </button>
+                <button class="btn-sm" id="update-app-btn-cli" onclick="updateAppNow('cli')">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
+                  Update CLI
+                </button>
+              </div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:4px">
+              <span id="update-status-text" style="font-size:12px;color:var(--text-muted)">MCPanel-WebUI: -</span>
+              <span id="cli-update-status-text" style="font-size:12px;color:var(--text-muted)">MCPanel-CLI: -</span>
+            </div>
+          </div>
+          <div class="info-box" style="margin-top:12px">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;margin-top:2px"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+            <span>Soon, all MCPanel products will move to <strong>github.com/MCPanel-Studios</strong>. Updates keep working through the move.</span>
+          </div>
+        </div>
+        <div class="settings-section">
+          <h3>BuildTools</h3>
+          <p class="section-desc">SpigotMC BuildTools.jar, used to compile Spigot servers locally</p>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+              <button class="btn-sm" onclick="checkBuildToolsVersion()">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
+                Check BuildTools Version
+              </button>
+              <button class="btn-sm" id="buildtools-update-btn" onclick="updateBuildToolsNow()">
+                Update Now
+              </button>
+            </div>
+            <span id="buildtools-status-text" style="font-size:12px;color:var(--text-muted)">BuildTools: -</span>
+          </div>
+        </div>
+      </div>
+      <div class="settings-layout hidden" id="spane-appearance">
         <div class="settings-section">
           <h3>Themes</h3>
           <p class="section-desc">Customize the look and feel of MCPanel-WebUI</p>
@@ -1262,6 +1394,8 @@
             <button class="btn-ghost" onclick="resetFontSettings()">Reset to Default</button>
           </div>
         </div>
+      </div>
+      <div class="settings-layout hidden" id="spane-about">
         <div class="settings-section">
           <h3>About</h3>
           <p class="section-desc" id="about-version">MCPanel-WebUI · Built for Minecraft server management</p>
@@ -1278,6 +1412,10 @@
             <button class="btn-ghost" onclick="window.mcpanel.openExternal('https://github.com/DippyCoder/mcpanel-cli')">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577v-2.165c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23a11.52 11.52 0 0 1 3.003-.404c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.63-5.37-12-12-12z"/></svg>
               MCPanel CLI
+            </button>
+            <button class="btn-ghost" onclick="window.mcpanel.openExternal('https://get-mcpanel.vercel.app/news')">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 22h14a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-2 2zm0 0a2 2 0 0 1-2-2v-9c0-1.1.9-2 2-2h2"/><path d="M18 14h-8"/><path d="M15 18h-5"/><path d="M10 6h8v4h-8z"/></svg>
+              News
             </button>
           </div>
           <div class="settings-footer">
@@ -1306,7 +1444,7 @@
       <div class="form-grid">
         <div class="form-group full">
           <label>Server Name</label>
-          <input type="text" id="cs-name" class="input" placeholder="My Survival Server">
+          <input type="text" id="cs-name" class="input" placeholder="My Survival Server" oninput="updateServerDestHint('cs')">
         </div>
         <div class="form-group">
           <label>Software</label>
@@ -1356,7 +1494,12 @@
             <option value="16G">16 GB</option>
             <option value="custom">Custom...</option>
           </select>
-          <input type="text" id="cs-ram-custom" class="input" placeholder="e.g. 3G, 2048M" style="display:none;margin-top:6px">
+          <input type="text" id="cs-ram-custom" class="input" placeholder="e.g. 3G, 2048M" style="display:none;margin-top:6px" oninput="updateHeapPlaceholder('cs')">
+        </div>
+        <div class="form-group">
+          <label>Heap Limit <span class="label-hint">(optional)</span></label>
+          <input type="text" id="cs-heap" class="input" placeholder="Auto">
+          <div class="field-hint">Java's share of the RAM allocation. Empty = picked automatically, leaving room for Java's own memory.</div>
         </div>
         <div class="form-group">
           <label>Storage Limit <span class="label-hint">(optional - min 500MB, 2GB+ recommended)</span></label>
@@ -1380,6 +1523,14 @@
             <option value="">- No profile (plain server) -</option>
           </select>
           <div id="cs-profile-hint" class="field-hint"></div>
+        </div>
+        <div class="form-group full">
+          <label>Location <span class="label-hint">(optional - any folder, drive or mount)</span></label>
+          <div class="input-row">
+            <input type="text" id="cs-dest" class="input" placeholder="Default (MCPanel's servers folder)" oninput="updateServerDestHint('cs')">
+            <button class="btn-sm" onclick="browseServerDest('cs')">Browse</button>
+          </div>
+          <div id="cs-dest-hint" class="field-hint"></div>
         </div>
       </div>
 
@@ -1486,6 +1637,28 @@
   </div>
 </div>
 
+<!-- Built-in SQLite editor (opened from a server's file browser) -->
+<div class="modal-overlay hidden" id="modal-sqlite">
+  <div class="modal db-sqlite-modal">
+    <div class="modal-header">
+      <div style="min-width:0">
+        <h2 id="sqlite-title">Database</h2>
+        <div class="db-sqlite-sub" id="sqlite-subtitle"></div>
+      </div>
+      <button class="modal-close" onclick="closeModal('modal-sqlite')">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="db-sqlite-body">
+      <div class="db-sqlite-tables">
+        <div class="db-section-title"><span>Tables</span></div>
+        <div id="sqlite-tables"></div>
+      </div>
+      <div class="db-sqlite-editor" id="sqlite-editor"></div>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay hidden" id="modal-confirm">
   <div class="modal small">
     <div class="modal-header">
@@ -1498,7 +1671,7 @@
       <p class="danger-text confirm-message" id="confirm-message"></p>
     </div>
     <div class="modal-footer">
-      <button class="btn-ghost" onclick="resolveConfirmDialog(false)">Cancel</button>
+      <button class="btn-ghost" id="confirm-cancel" onclick="resolveConfirmDialog(false)">Cancel</button>
       <button class="btn-danger" id="confirm-ok" onclick="resolveConfirmDialog(true)">Delete</button>
     </div>
   </div>
@@ -1611,10 +1784,11 @@
     <div class="modal-body">
       <div class="form-grid">
         <div class="form-group full">
-          <label>Server Folder</label>
+          <label>Server Folders</label>
+          <div id="is-folder-list" style="display:flex;flex-direction:column;gap:6px;margin-bottom:6px"></div>
           <div class="input-row">
-            <input type="text" id="is-folder-path" class="input" placeholder="No folder selected" readonly>
-            <button class="btn-sm" onclick="browseImportServerFolder()">Browse</button>
+            <button class="btn-sm" onclick="browseImportServerFolder()">Add Folder…</button>
+            <span style="font-size:12px;color:var(--text-muted)">Add several folders to import them all at once.</span>
           </div>
           <div id="is-scan-hint" style="font-size:12px;color:var(--text-secondary);margin-top:6px"></div>
         </div>
@@ -1624,11 +1798,11 @@
           </label>
           <div style="font-size:12px;color:var(--text-muted);margin-top:4px">MCPanel will use the folder instead of cloning it.</div>
         </div>
-        <div class="form-group full">
+        <div class="form-group full is-single-only">
           <label>Server Name</label>
           <input type="text" id="is-name" class="input" placeholder="My Imported Server">
         </div>
-        <div class="form-group">
+        <div class="form-group is-single-only">
           <label>Software</label>
           <select id="is-software" class="input">
             <option value="paper">Paper</option>
@@ -1641,11 +1815,11 @@
             <option value="spigot">Spigot</option>
           </select>
         </div>
-        <div class="form-group">
+        <div class="form-group is-single-only">
           <label>Version</label>
           <input type="text" id="is-version" class="input" placeholder="e.g. 1.21.4">
         </div>
-        <div class="form-group">
+        <div class="form-group is-single-only">
           <label>Port</label>
           <input type="number" id="is-port" class="input" value="25565">
         </div>
@@ -1677,7 +1851,7 @@
         </div>
       </div>
       <div class="info-box" style="margin-top:12px">
-        The selected folder's contents will be copied into MCPanel's servers directory. Port and software type are auto-detected from <code style="font-family:var(--font-mono);font-size:11px">server.properties</code> when you browse.
+        The selected folders' contents will be copied into MCPanel's servers directory. Port and software type are auto-detected from <code style="font-family:var(--font-mono);font-size:11px">server.properties</code> when you add a folder. With several folders, each server keeps its detected settings and the RAM and Java settings apply to all of them.
       </div>
     </div>
     <div class="modal-footer">
@@ -1697,6 +1871,12 @@
       </button>
     </div>
     <div class="modal-body">
+      <div class="theme-browser-toolbar">
+        <select class="input" id="theme-browser-source" onchange="switchThemeSource(this.value)">
+          <option value="mcpanel">MCPanel</option>
+          <option value="mclib">MCLib</option>
+        </select>
+      </div>
       <div id="theme-browser-content">
         <div style="text-align:center;padding:40px 0;color:var(--text-muted)">Loading themes…</div>
       </div>
@@ -1789,10 +1969,10 @@
         <div class="server-tools-title">Tools</div>
         <div class="tool-row">
           <div>
-            <div class="tool-label">Duplicate Server</div>
-            <div class="tool-desc">Create an exact copy of this server with all its files.</div>
+            <div class="tool-label">Clone Server</div>
+            <div class="tool-desc">Copy this server with all its files - optionally to another location or version.</div>
           </div>
-          <button class="btn-sm" onclick="openDuplicateServerModal()">Duplicate</button>
+          <button class="btn-sm" onclick="openDuplicateServerModal()">Clone</button>
         </div>
         <div class="tool-row">
           <div>
@@ -1823,11 +2003,53 @@
   </div>
 </div>
 
-<!-- Duplicate Server Modal -->
+<!-- Database: edit cell -->
+<div class="modal-overlay hidden" id="modal-db-cell">
+  <div class="modal small">
+    <div class="modal-header">
+      <h2>Edit Value</h2>
+      <button class="modal-close" onclick="closeModal('modal-db-cell')">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <div class="db-cell-meta" id="db-cell-meta"></div>
+      <textarea id="db-cell-value" class="input db-textarea" spellcheck="false"></textarea>
+      <label class="checkbox-item" style="margin-top:10px">
+        <input type="checkbox" id="db-cell-null" onchange="DatabasesUI.cellNullToggle()"> NULL
+      </label>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-ghost" onclick="closeModal('modal-db-cell')">Cancel</button>
+      <button class="btn-primary" onclick="DatabasesUI.saveCell()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Database: add row -->
+<div class="modal-overlay hidden" id="modal-db-row">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Add Row</h2>
+      <button class="modal-close" onclick="closeModal('modal-db-row')">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <div class="form-grid" id="db-row-fields"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-ghost" onclick="closeModal('modal-db-row')">Cancel</button>
+      <button class="btn-primary" onclick="DatabasesUI.saveRow()">Add Row</button>
+    </div>
+  </div>
+</div>
+
+<!-- Clone (Duplicate) Server Modal -->
 <div class="modal-overlay hidden" id="modal-duplicate-server">
   <div class="modal small">
     <div class="modal-header">
-      <h2>Duplicate Server</h2>
+      <h2>Clone Server</h2>
       <button class="modal-close" onclick="closeModal('modal-duplicate-server')">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
       </button>
@@ -1835,8 +2057,23 @@
     <div class="modal-body">
       <div class="form-group full">
         <label>New Server Name</label>
-        <input type="text" id="dup-name" class="input" placeholder="Copy of My Server" onkeydown="if(event.key==='Enter')executeDuplicateServer()">
+        <input type="text" id="dup-name" class="input" placeholder="Copy of My Server" oninput="updateServerDestHint('dup')" onkeydown="if(event.key==='Enter')executeDuplicateServer()">
       </div>
+      <div class="form-grid" style="margin-top:12px">
+        <div class="form-group full">
+          <label>Version</label>
+          <select id="dup-version" class="input" onchange="onCloneVersionChange()"></select>
+        </div>
+        <div class="form-group full">
+          <label>Location <span class="label-hint">(optional - any folder, drive or mount)</span></label>
+          <div class="input-row">
+            <input type="text" id="dup-dest" class="input" placeholder="Default (MCPanel's servers folder)" oninput="updateServerDestHint('dup')">
+            <button class="btn-sm" onclick="browseServerDest('dup')">Browse</button>
+          </div>
+          <div id="dup-dest-hint" class="field-hint"></div>
+        </div>
+      </div>
+      <div class="warning-box hidden" id="dup-version-warning" style="margin-top:12px"></div>
       <div class="info-box" style="margin-top:12px">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
         All files will be copied. Remember to update the port in settings to avoid conflicts.
@@ -1844,7 +2081,7 @@
     </div>
     <div class="modal-footer">
       <button class="btn-ghost" onclick="closeModal('modal-duplicate-server')">Cancel</button>
-      <button class="btn-primary" id="dup-submit" onclick="executeDuplicateServer()">Duplicate</button>
+      <button class="btn-primary" id="dup-submit" onclick="executeDuplicateServer()">Clone</button>
     </div>
   </div>
 </div>
@@ -2097,7 +2334,7 @@
             <div class="plugin-detail-desc" id="pdetail-desc"></div>
           </div>
           <div class="plugin-detail-actions">
-            <button class="plugin-install-btn" id="pdetail-install-btn">Install</button>
+            <div id="pdetail-plugin-actions"></div>
             <button class="btn-ghost-sm" id="pdetail-website-btn">Website</button>
           </div>
         </div>
@@ -2122,6 +2359,32 @@
 <div class="wnd-resize sw" onmousedown="window.mcpanel.startResizeDragging('SouthWest')"></div>
 <div class="wnd-resize s"  onmousedown="window.mcpanel.startResizeDragging('South')"></div>
 <div class="wnd-resize se" onmousedown="window.mcpanel.startResizeDragging('SouthEast')"></div>
+
+<!-- Plugin / Mod third-party disclaimer - shown before an install until snoozed/hidden -->
+<div class="modal-overlay modal-overlay-top hidden" id="modal-plugin-disclaimer">
+  <div class="modal" style="max-width:500px">
+    <div class="modal-header">
+      <h2 class="modal-title" id="plugin-disclaimer-title">Third-party plugin</h2>
+    </div>
+    <div class="modal-body">
+      <div class="plugin-disclaimer-text" id="plugin-disclaimer-text"></div>
+      <div class="plugin-disclaimer-deps hidden" id="plugin-disclaimer-deps">
+        <div class="plugin-detail-section-title">Also installs these required dependencies</div>
+        <ul class="plugin-dep-list" id="plugin-disclaimer-deps-list"></ul>
+      </div>
+      <div class="plugin-disclaimer-deps missing hidden" id="plugin-disclaimer-missing">
+        <div class="plugin-detail-section-title">Required, but must be installed manually</div>
+        <ul class="plugin-dep-list" id="plugin-disclaimer-missing-list"></ul>
+      </div>
+      <a class="plugin-disclaimer-tos" id="plugin-disclaimer-tos"></a>
+      <label class="checkbox-item plugin-disclaimer-skip"><input type="checkbox" id="plugin-disclaimer-skip"> Don't show this again</label>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-ghost" onclick="resolvePluginDisclaimer(false)">Cancel</button>
+      <button class="btn-primary" onclick="resolvePluginDisclaimer(true)">Accept and install</button>
+    </div>
+  </div>
+</div>
 
 <link rel="stylesheet" href="lib/xterm.css">
 <!-- External Link Modal - stacks on top of any open modal -->
@@ -2164,6 +2427,7 @@
 <script src="web-bridge.js"></script>
 <script src="app.js"></script>
 <script src="addons-ui.js"></script>
+<script src="databases-ui.js"></script>
 <script src="accounts-ui.js"></script>
 </body>
 </html>

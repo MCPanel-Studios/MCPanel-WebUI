@@ -19,6 +19,7 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const express = require('express');
+const AdmZip = require('adm-zip');
 const { WebSocketServer } = require('ws');
 
 const pkg = require('../package.json');
@@ -392,6 +393,65 @@ app.post('/api/upload-stage/clear', (req, res) => {
   res.json({ ok: true });
 });
 
+// ── Downloads ──
+// The file manager's right-click "Download": sends one server file to the
+// browser, or a folder as a .zip. Authorised exactly like an RPC command, as
+// `download_server_file` (files.download) in permissions.js.
+const MAX_DOWNLOAD_ZIP_BYTES = 2 * 1024 ** 3;   // zipped in memory, so capped
+
+// Regular files under `dir` as [absPath, pathInZip]. Symlinks are skipped so a
+// link inside a server folder can't pull files from elsewhere on the host into
+// the zip. Throws once the running total passes the cap.
+function collectZipFiles(dir, prefix, out, total = { bytes: 0 }) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const abs = path.join(dir, entry.name);
+    const rel = `${prefix}/${entry.name}`;
+    if (entry.isDirectory()) collectZipFiles(abs, rel, out, total);
+    else if (entry.isFile()) {
+      total.bytes += fs.statSync(abs).size;
+      if (total.bytes > MAX_DOWNLOAD_ZIP_BYTES) {
+        throw Object.assign(new Error('Folder is larger than 2 GB - download its contents separately'), { tooLarge: true });
+      }
+      out.push([abs, rel]);
+    }
+  }
+  return out;
+}
+
+app.get('/api/download', (req, res) => {
+  const id = String(req.query.id || '');
+  const rel = String(req.query.path || '').replace(/\\/g, '/');
+  const denied = permissionDenied(req.user, 'download_server_file', { id, path: rel });
+  if (denied) return res.status(403).json({ ok: false, error: denied, code: 'forbidden', forbidden: true });
+
+  let full;
+  try {
+    if (!rel) throw new Error('Invalid path');
+    util.assertSafeRel(rel);
+    const base = fs.realpathSync(util.getServerDir(id));
+    full = fs.realpathSync(path.join(base, rel));
+    // realpath on both sides: a symlink must not lead out of the server folder.
+    if (!full.startsWith(base + path.sep)) throw new Error('Invalid path');
+  } catch (e) {
+    return res.status(404).json({ ok: false, error: e.message, code: 'not_found' });
+  }
+
+  const name = path.basename(full);
+  try {
+    const st = fs.statSync(full);
+    if (st.isFile()) return res.download(full, name);
+    if (!st.isDirectory()) return res.status(400).json({ ok: false, error: 'Not a file or folder' });
+    const zip = new AdmZip();
+    for (const [abs, inZip] of collectZipFiles(full, name, [])) {
+      zip.addLocalFile(abs, path.posix.dirname(inZip));
+    }
+    res.attachment(`${name}.zip`);
+    res.send(zip.toBuffer());
+  } catch (e) {
+    res.status(e.tooLarge ? 413 : 500).json({ ok: false, error: e.message });
+  }
+});
+
 // ─── Static gate ─────────────────────────────────────────────────────────────
 // Signed out, a client gets the login page and the handful of assets that page
 // needs - nothing more. The panel's own code (app.js, web-bridge.js, the
@@ -547,6 +607,10 @@ if (typeof commands.__start_scheduler === 'function') {
   commands.__start_scheduler({}, SYSTEM_CTX);
 }
 
+if (typeof commands.__start_autoupdater === 'function') {
+  commands.__start_autoupdater({}, SYSTEM_CTX);
+}
+
 // Builtin themes are written on first launch so the four stock themes exist
 // even before the frontend calls ensure_builtin_themes().
 if (typeof commands.ensure_builtin_themes === 'function') {
@@ -617,8 +681,31 @@ state.applyNetworkConfig = ({ host, port }) => {
   });
 };
 
+// A WebUI relaunched by restart_app starts while the old process may still
+// hold the port for a moment, so it retries briefly instead of crashing.
+let relaunchListenRetries = process.env.MCPANEL_WEBUI_RELAUNCHED ? 20 : 0;
+delete process.env.MCPANEL_WEBUI_RELAUNCHED;
+function onBootListenError(err) {
+  if (err.code === 'EADDRINUSE' && relaunchListenRetries-- > 0) {
+    setTimeout(() => server.listen(ARGS.port, ARGS.host), 500);
+    return;
+  }
+  throw err;
+}
+server.on('error', onBootListenError);
+server.once('listening', () => server.removeListener('error', onBootListenError));
+
 server.listen(ARGS.port, ARGS.host, async () => {
   printListeningBanner();
+
+  // Remember where this WebUI lives, so `mcpanel updateapp -p webui` run from
+  // a terminal (no -p <path>) can find it. Best-effort.
+  try {
+    fs.mkdirSync(paths.home(), { recursive: true });
+    fs.writeFileSync(paths.webuiRecordPath(), JSON.stringify({ dir: cli.WEBUI_DIR }));
+  } catch (e) {
+    applog.warn(`could not record the WebUI folder: ${e.message}`);
+  }
 
   if (!permissions) {
     process.stdout.write('  ⚠  server/permissions.js failed to load - every non-admin request\n' +

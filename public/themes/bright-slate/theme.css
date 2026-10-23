@@ -137,7 +137,7 @@ body { background: var(--bg-base); }
 .btn-xs { background: var(--bg-elevated); border-color: var(--border); color: var(--text-secondary); }
 .btn-xs:hover { border-color: var(--accent); color: var(--text-primary); background: var(--accent-dim); }
 .btn-ghost-sm { border-color: var(--border); color: var(--text-muted); }
-.btn-ghost-sm:hover { border-color: var(--border-focus); color: var(--text-primary); }
+.btn-ghost-sm:hover { border-color: var(--accent); color: var(--text-primary); }
 
 /* Quick controls */
 .quick-ctrl-btn { background: var(--bg-elevated); border-color: var(--border); color: var(--text-secondary); }

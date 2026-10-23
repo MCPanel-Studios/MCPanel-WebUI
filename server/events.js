@@ -7,7 +7,7 @@
 
    Channels used by the frontend:
      server-log, server-stopped, download-progress, backup-progress,
-     schedule-fired, pty-data, pty-closed
+     schedule-fired, pty-data, pty-closed, restart-required
    ═══════════════════════════════════════════════════════════════════════════ */
 
 'use strict';

@@ -93,7 +93,7 @@
 }
 .btn-sm:hover { border-color: var(--accent); background: var(--accent-dim); }
 .btn-xs:hover { border-color: var(--accent); background: var(--accent-dim); }
-.btn-ghost-sm:hover { border-color: var(--border-focus); }
+.btn-ghost-sm:hover { border-color: var(--accent); }
 
 /* Quick ctrl buttons */
 .quick-ctrl-btn:hover {

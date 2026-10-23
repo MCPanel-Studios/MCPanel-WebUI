@@ -19,11 +19,18 @@ const paths = require('../paths');
 const applog = require('../applog');
 const util = require('../util');
 
-// The remote catalogue the "Browse themes" dialog reads. This is the exact
-// URL the Tauri app uses (commands.rs:1070) and must stay that way - both
-// apps share one published index.
-const GITHUB_THEMES_INDEX =
+// The remote catalogues the "Browse themes" dialog reads: MCPanel's on its
+// `themes` branch, MCLib's next to its addon index on `main`. These are the
+// exact URLs the Tauri app uses (MCPANEL_THEMES_INDEX / MCLIB_THEMES_INDEX in
+// commands.rs) and must stay that way - both apps share the published indexes.
+//
+// MCPanel's lists the official themes with direct `downloadUrl`s. MCLib's is
+// built like its addon index: entries only point at each theme's GitHub or
+// Codeberg repository, and the version and .zip come from its releases.
+const MCPANEL_THEMES_INDEX =
   'https://raw.githubusercontent.com/DippyCoder/MCPanel/themes/themes-index.json';
+const MCLIB_THEMES_INDEX =
+  'https://raw.githubusercontent.com/DippyCoder/MCLib/main/themes-index.json';
 
 // Order matters only for logging; ids match public/themes/<id>/.
 const BUILTIN_THEMES = ['purple-dark', 'clean-dark', 'dark-slate', 'bright-slate'];
@@ -55,6 +62,81 @@ function copyDirOverwrite(src, dst) {
     if (entry.isDirectory()) copyDirOverwrite(from, to);
     else fs.copyFileSync(from, to);
   }
+}
+
+/** GET exactly `url` (no organisation fallback) as JSON, or null. */
+async function fetchJsonExact(url) {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), 10000);
+  try {
+    const res = await fetch(url, { headers: { 'User-Agent': 'MCPanel' }, signal: ac.signal });
+    return res.ok ? await res.json() : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+/**
+ * {version, zip} of the newest non-draft, non-prerelease release of a
+ * GitHub/Codeberg `project`, taken from its first .zip asset, or the release's
+ * source archive when none is attached (the installer finds theme.json under
+ * the archive's wrapping folder); the release tag is the version. The project URL is used as listed (no organisation
+ * fallback): it names the theme's own repository, wherever that lives.
+ */
+async function latestThemeRelease(project) {
+  let api;
+  if (project.startsWith('https://github.com/')) {
+    api = `https://api.github.com/repos/${project.slice('https://github.com/'.length)}/releases?per_page=20`;
+  } else if (project.startsWith('https://codeberg.org/')) {
+    api = `https://codeberg.org/api/v1/repos/${project.slice('https://codeberg.org/'.length)}/releases?limit=20`;
+  } else {
+    return null; // MCLib only lists GitHub and Codeberg projects
+  }
+  const releases = await fetchJsonExact(api);
+  if (!Array.isArray(releases)) return null;
+  const release = releases.find(r => r && !r.draft && !r.prerelease);
+  if (!release || typeof release.tag_name !== 'string') return null;
+  const asset = (release.assets || []).find(a =>
+    a && typeof a.name === 'string' && a.name.toLowerCase().endsWith('.zip') && a.browser_download_url);
+  const zip = asset ? asset.browser_download_url : release.zipball_url;
+  if (typeof zip !== 'string' || !zip) return null;
+  return { version: release.tag_name.replace(/^v/i, ''), zip };
+}
+
+/** An MCLib theme entry as a theme-browser card, or null if it has no installable release. */
+async function mclibThemeCard(entry) {
+  if (!entry || typeof entry.project !== 'string') return null;
+  const release = await latestThemeRelease(entry.project);
+  if (!release) return null;
+  const authors = Array.isArray(entry.authors) ? entry.authors.filter(a => typeof a === 'string') : [];
+  return {
+    name: entry.name,
+    creator: authors.join(', '),
+    creatorUrl: entry.project,
+    description: entry.description,
+    version: release.version,
+    downloadUrl: release.zip,
+    source: 'mclib',
+  };
+}
+
+async function fetchOfficialThemes() {
+  const index = await util.fetchJson(MCPANEL_THEMES_INDEX);
+  if (!index) return null;
+  const list = Array.isArray(index.themes) ? index.themes : [];
+  return list
+    .filter(t => t && typeof t === 'object' && !Array.isArray(t))
+    .map(t => ({ ...t, source: 'mcpanel' }));
+}
+
+async function fetchMclibThemes() {
+  const index = await util.fetchJson(MCLIB_THEMES_INDEX);
+  if (!index || !Array.isArray(index.themes)) return null;
+  // One release lookup per theme, all at once.
+  const cards = await Promise.all(index.themes.map(mclibThemeCard));
+  return cards.filter(Boolean);
 }
 
 // ─── CSS url() rewriting ─────────────────────────────────────────────────────
@@ -294,29 +376,15 @@ module.exports = {
   },
 
   /**
-   * Reads the published theme catalogue. A reachable-but-unparseable response
-   * and an unreachable host are reported differently, matching the Rust - the
-   * UI shows an error banner only for the latter.
+   * Reads both theme catalogues and merges them, tagging each theme with its
+   * `source`; MCLib themes without an installable release are left out. Only
+   * when neither catalogue is readable is an error reported, matching the
+   * Rust - the UI shows an error banner only then.
    */
   async fetch_github_themes() {
-    const ac = new AbortController();
-    const t = setTimeout(() => ac.abort(), 10000);
-    let body;
-    try {
-      const res = await fetch(GITHUB_THEMES_INDEX, { signal: ac.signal });
-      if (!res.ok) return { themes: [], error: 'Failed to fetch themes' };
-      body = await res.text();
-    } catch {
-      return { themes: [], error: 'Failed to fetch themes' };
-    } finally {
-      clearTimeout(t);
-    }
-
-    try {
-      return JSON.parse(body);
-    } catch {
-      return { themes: [] };
-    }
+    const [official, mclib] = await Promise.all([fetchOfficialThemes(), fetchMclibThemes()]);
+    if (!official && !mclib) return { themes: [], error: 'Failed to fetch themes' };
+    return { themes: [...(official || []), ...(mclib || [])] };
   },
 
   async install_theme_from_url({ url }) {

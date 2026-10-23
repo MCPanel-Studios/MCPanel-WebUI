@@ -70,9 +70,11 @@ async function init() {
   startStatusPolling();
   startUptimeTicker();
   setupConsoleScroll();
+  setupConsolePlayerMenu();
+  setupScrollHoverGuard();
 
-  updateSidebarStats();
-  updateServersPageStats();
+  // Awaited so the loading screen stays up until the stats are filled in.
+  await Promise.allSettled([updateSidebarStats(), updateServersPageStats()]);
   if (sidebarStatsInterval) clearInterval(sidebarStatsInterval);
   sidebarStatsInterval = setInterval(updateSidebarStats, 5000);
 
@@ -99,6 +101,9 @@ async function init() {
 
   window.mcpanel.checkUpdate().then(result => applyUpdateResult(result));
   window.mcpanel.checkCliUpdate().then(result => applyCliUpdateResult(result));
+  // Updates the server installed on its own (auto-update) - admins only.
+  showPendingRestart();
+  window.mcpanel.on('restart-required', showPendingRestart);
   window.mcpanel.getBuildToolsVersion().then(result => {
     applyBuildToolsResult(result);
     if (result && result.version !== 'installed') showBuildToolsMissingModal();
@@ -160,6 +165,8 @@ async function loadAppSettings() {
   if (el) el.checked = _appSettings.runInBackground !== false;
   const clearEl = document.getElementById('setting-clear-console-on-start');
   if (clearEl) clearEl.checked = _appSettings.clearConsoleOnStart === true;
+  const autoUpdateEl = document.getElementById('setting-auto-update');
+  if (autoUpdateEl) autoUpdateEl.checked = _appSettings.autoUpdate === true;
   const maxLogFilesEl = document.getElementById('setting-max-log-files');
   if (maxLogFilesEl) maxLogFilesEl.value = _appSettings.maxLogFiles || 10;
   applyFontSettings(_appSettings.fonts || {});
@@ -174,6 +181,11 @@ async function saveRunInBackground() {
 
 async function saveClearConsoleOnStart() {
   _appSettings.clearConsoleOnStart = document.getElementById('setting-clear-console-on-start').checked;
+  await window.mcpanel.saveAppSettings(_appSettings);
+}
+
+async function saveAutoUpdate() {
+  _appSettings.autoUpdate = document.getElementById('setting-auto-update').checked;
   await window.mcpanel.saveAppSettings(_appSettings);
 }
 
@@ -337,7 +349,7 @@ function openServerDetail(id) {
     `${srv.version} · ${capitalise(srv.software)} · Port ${srv.port}`;
   document.getElementById('dtab-plugins-label').textContent = _pluginTabLabel(srv.software);
   document.getElementById('detail-port').textContent = srv.port;
-  setRamBar(0, srv.ram);
+  setRamBar(0, srv.ram, srv.heap);
   setCpuGauge(null, false);
 
   document.getElementById('quick-port').value = srv.port;
@@ -353,6 +365,7 @@ function openServerDetail(id) {
       velocityCard.classList.add('hidden');
     }
   }
+  renderProxyLink(srv);
 
   consoleAutoScroll = true;
   document.getElementById('autoscroll-banner').classList.add('hidden');
@@ -360,6 +373,7 @@ function openServerDetail(id) {
   logEl.innerHTML = '';
   stopConsolePoll();
   consoleLogOffset = 0;
+  seedConsolePlayers(id);
 
   window.mcpanel.isServerRunning(id).then(running => {
     updateDetailControls(running);
@@ -393,7 +407,7 @@ async function refreshDetailStats(id) {
   if (!srv) return;
   const result = await window.mcpanel.getServerDirStats(id);
   setStorageBar(result.size, srv.storageLimit);
-  setRamBar(result.ramBytes || 0, srv.ram);
+  setRamBar(result.ramBytes || 0, srv.ram, srv.heap);
   const online = result.cpuPct != null;
   setCpuGauge(online ? result.cpuPct : null, online);
 }
@@ -570,15 +584,15 @@ function createServerCard(srv) {
       </div>
       <div class="stat-chip">
         <div class="stat-chip-label">RAM</div>
-        <div class="stat-chip-value">${srv.ram}</div>
+        <div class="stat-chip-value" id="ram-${srv.id}">${cardRamText(srv)}</div>
       </div>
       <div class="stat-chip">
         <div class="stat-chip-label">Players</div>
-        <div class="stat-chip-value" id="players-${srv.id}">-</div>
+        <div class="stat-chip-value" id="players-${srv.id}">${cardPlayersText(srv)}</div>
       </div>
       <div class="stat-chip">
         <div class="stat-chip-label">Storage</div>
-        <div class="stat-chip-value" id="storage-${srv.id}">${srv.storageLimit || '∞'}</div>
+        <div class="stat-chip-value" id="storage-${srv.id}">${cardStorageText(srv)}</div>
       </div>
       <div class="stat-chip">
         <div class="stat-chip-label">Uptime</div>
@@ -620,7 +634,11 @@ function updateServerCardStatus(id, online, players) {
       badge.textContent = 'OFFLINE';
     }
   }
-  if (playersEl) playersEl.textContent = online === true ? players : '-';
+  const srv = config.servers.find(s => s.id === id);
+  if (online !== true && cardStats[id]) delete cardStats[id].ramBytes;
+  if (playersEl) playersEl.textContent = cardPlayersText(srv, online === true ? players : 0);
+  const ramEl = document.getElementById(`ram-${id}`);
+  if (ramEl) ramEl.textContent = cardRamText(srv);
   if (startBtn) startBtn.style.display = online ? 'none' : '';
   if (stopBtn) stopBtn.style.display = online ? '' : 'none';
 }
@@ -770,6 +788,8 @@ async function pollAllStatuses() {
         }
         startingServers.delete(srv.id);
         serverPlayerData[srv.id] = { players: status.players || 0, maxPlayers: status.maxPlayers || 0, isVelocity: srv.software === 'velocity' };
+        const live = await window.mcpanel.getServerDirStats(srv.id, { noSize: true });
+        cardStats[srv.id] = { ...cardStats[srv.id], ramBytes: live.ramBytes, maxPlayers: status.maxPlayers || live.maxPlayers };
         updateServerCardStatus(srv.id, true, status.players || 0);
         updateSidebarDot(srv.id, true);
         if (currentServerId === srv.id) {
@@ -797,7 +817,7 @@ async function pollAllStatuses() {
       updateSidebarDot(srv.id, false);
       if (currentServerId === srv.id) {
         updateDetailControls(false);
-        setRamBar(0, srv.ram);
+        setRamBar(0, srv.ram, srv.heap);
         setPlayersBar(0, 0, false);
         setCpuGauge(null, false);
         currentOnlinePlayers = [];
@@ -805,6 +825,82 @@ async function pollAllStatuses() {
     }
   }
   updateServersPageStats();
+  refreshCardSizes();
+}
+
+// ─── Server card stats (used / max) ────────────────────────────────────────────
+// cardStats[id] = { size, sizeAt, ramBytes, maxPlayers }. Disk usage walks the
+// whole server folder (worlds included), so it is refreshed at most once a
+// minute per server; RAM comes with the 5 s status poll for running servers.
+const cardStats = {};
+const CARD_SIZE_TTL = 60000;
+let cardSizesRunning = false;
+
+// 1.4GB / 512MB - whole numbers past 10 GB, and no trailing ".0".
+function _compactSize(bytes) {
+  if (bytes == null) return '…';
+  const gb = bytes / 1024 ** 3;
+  if (gb >= 1) return `${gb >= 10 ? Math.round(gb) : +gb.toFixed(1)}GB`;
+  return `${Math.max(1, Math.round(bytes / 1024 ** 2))}MB`;
+}
+
+// A limit as typed ("6G", "2048M", "20GB") shown in the same units as the
+// usage next to it; left as typed if it can't be read. A RAM value without a
+// unit is megabytes, like everywhere else in MCPanel.
+function _limitText(value, bareUnit = '') {
+  if (!value) return '∞';
+  const bytes = parseStorageLimit(/^\d+(\.\d+)?$/.test(String(value).trim()) ? `${value}${bareUnit}` : value);
+  return bytes ? _compactSize(bytes) : String(value);
+}
+
+function cardRamText(srv) {
+  if (!srv) return '-';
+  const used = cardStats[srv.id]?.ramBytes;
+  // Over the cap, the limit shown is the RAM cap + heap cap.
+  const capMb = ramToMb(srv.ram);
+  const heapMb = ramToMb(srv.heap) || autoHeapMb(srv.ram);
+  if (used && capMb && heapMb && used > capMb * 1048576) {
+    return `${_compactSize(used)}/${_compactSize((capMb + heapMb) * 1048576)}`;
+  }
+  return `${used ? _compactSize(used) : '0'}/${_limitText(srv.ram, 'M')}`;
+}
+
+function cardPlayersText(srv, online) {
+  if (!srv) return '-';
+  const max = serverPlayerData[srv.id]?.maxPlayers || cardStats[srv.id]?.maxPlayers;
+  const now = online ?? serverPlayerData[srv.id]?.players ?? 0;
+  return `${now}/${max ?? '?'}`;
+}
+
+function cardStorageText(srv) {
+  if (!srv) return '-';
+  return `${_compactSize(cardStats[srv.id]?.size)}/${_limitText(srv.storageLimit)}`;
+}
+
+function _paintCardStats(srv) {
+  const set = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
+  set(`storage-${srv.id}`, cardStorageText(srv));
+  set(`ram-${srv.id}`, cardRamText(srv));
+  set(`players-${srv.id}`, cardPlayersText(srv));
+}
+
+// One server at a time, oldest first, so a slow disk never holds up the poll.
+async function refreshCardSizes() {
+  if (cardSizesRunning) return;
+  cardSizesRunning = true;
+  try {
+    const now = Date.now();
+    const due = config.servers.filter(s => !cardStats[s.id]?.sizeAt || now - cardStats[s.id].sizeAt > CARD_SIZE_TTL);
+    for (const srv of due) {
+      const r = await window.mcpanel.getServerDirStats(srv.id);
+      if (!config.servers.some(s => s.id === srv.id)) continue;   // deleted meanwhile
+      cardStats[srv.id] = { ...cardStats[srv.id], size: r.size, sizeAt: Date.now(),
+        maxPlayers: r.maxPlayers ?? cardStats[srv.id]?.maxPlayers };
+      _paintCardStats(srv);
+    }
+  } finally {
+    cardSizesRunning = false;
+  }
 }
 
 async function startServerFlow(id) {
@@ -853,8 +949,15 @@ function closeEulaModal() {
 
 async function checkPrivacyPolicy() {
   try {
-    const res = await fetch('https://gist.githubusercontent.com/DippyCoder/559659736b49a56964dae2e5c0f5f5dc/raw');
-    if (!res.ok) return;
+    // MCPanel-Studios first, the old DippyCoder path as fallback.
+    let res = null;
+    for (const owner of ['MCPanel-Studios', 'DippyCoder']) {
+      try {
+        res = await fetch(`https://gist.githubusercontent.com/${owner}/559659736b49a56964dae2e5c0f5f5dc/raw`);
+        if (res.ok) break;
+      } catch (_) { res = null; }
+    }
+    if (!res || !res.ok) return;
     const text = await res.text();
     const match = text.match(/\*\*Document Last Updated:\*\*\s*(.+)/);
     if (!match) return;
@@ -900,6 +1003,13 @@ function switchDetailTab(name) {
   if (name === 'backups') openBackupsTab();
   if (name === 'schedule') openScheduleTab();
   if (name === 'players') openPlayersTab();
+}
+
+function switchSettingsTab(name) {
+  ['general', 'updates', 'appearance', 'about'].forEach(t => {
+    document.getElementById(`stab-${t}`)?.classList.toggle('active', t === name);
+    document.getElementById(`spane-${t}`)?.classList.toggle('hidden', t !== name);
+  });
 }
 
 // ─── Logs Tab ─────────────────────────────────────────────────────────────────
@@ -1166,6 +1276,19 @@ function renderFileBrowser() {
     return a.type === 'dir' ? -1 : 1;
   });
 
+  if (!sorted.length) {
+    // The inline + offers the toolbar menu's New File / New Folder, right under itself.
+    listEl.innerHTML = `
+      <div class="file-empty">
+        <div class="file-empty-title">Feels empty in here...</div>
+        <div class="file-empty-sub">Click on
+          <button class="file-empty-plus" title="Create New" onclick="openEmptyFolderNewMenu(this)">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+          to create a file or a folder.</div>
+      </div>`;
+  }
+
   for (const node of sorted) {
     const nodePath = [...fileNavPaths, node.name].join('/');
     const row = document.createElement('div');
@@ -1198,6 +1321,7 @@ function renderFileBrowser() {
       e.stopPropagation();
       deleteFileEntry(nodePath, node.name, node.type === 'dir');
     });
+    row.addEventListener('contextmenu', e => openFileContextMenu(e, row, nodePath, node));
 
     if (node.type === 'dir') {
       row.ondblclick = () => {
@@ -1486,6 +1610,11 @@ function _runEditorValidation() {
 }
 
 async function openFileEditor(relPath, name, ctx) {
+  // Database files open in the built-in database editor; anything that turns
+  // out not to be SQLite (e.g. an H2 trace .db) falls through to the text editor.
+  if ((!ctx || ctx.type === 'server') && window.DatabasesUI?.isDbFile(name)) {
+    if (await window.DatabasesUI.openSqlite(currentServerId, relPath, name)) return;
+  }
   _editorRelPath = relPath;
   _editorCtx = ctx || { type: 'server', id: currentServerId };
   document.getElementById('file-editor-title').textContent = name;
@@ -1602,11 +1731,13 @@ async function _downloadSelection(scope) {
 let _fileMoveCtx = null;              // { scope, paths, dest }  - dest is a rel path, '' = root
 let _fileMoveExpanded = new Set();    // rel paths of expanded folders in the picker
 
-function openFileMoveModal(scope) {
+// `only`: move just these paths (the right-click menu on one unselected item)
+// instead of the current selection, which is then left as it was.
+function openFileMoveModal(scope, only = null) {
   const isProfile = scope === 'profile';
-  const paths = [...(isProfile ? selectedProfileFilePaths : selectedFilePaths)];
+  const paths = only || [...(isProfile ? selectedProfileFilePaths : selectedFilePaths)];
   if (!paths.length) return;
-  _fileMoveCtx = { scope, paths, dest: null };
+  _fileMoveCtx = { scope, paths, dest: null, keepSelection: !!only };
   // Root is expanded, plus the chain down to where the items currently live so
   // the tree opens near them.
   _fileMoveExpanded = new Set(['', ..._ancestorPaths(paths[0])]);
@@ -1685,7 +1816,7 @@ function renderFileMoveTree() {
 
 async function submitFileMove() {
   if (!_fileMoveCtx) return;
-  const { scope, paths, dest } = _fileMoveCtx;
+  const { scope, paths, dest, keepSelection } = _fileMoveCtx;
   if (dest === null) { toast('Pick a destination folder', 'error'); return; }
   closeModal('modal-file-move');
 
@@ -1709,11 +1840,12 @@ async function submitFileMove() {
   else if (skipped) toast('Nothing to move - items are already there', 'info');
 
   _fileMoveCtx = null;
+  const selection = isProfile ? selectedProfileFilePaths : selectedFilePaths;
+  if (keepSelection) paths.forEach(p => selection.delete(p));
+  else selection.clear();
   if (isProfile) {
-    selectedProfileFilePaths.clear();
     await reloadProfileFileTree();
   } else {
-    selectedFilePaths.clear();
     cachedFileTree = null;
     await openFilesTab();
   }
@@ -1774,6 +1906,8 @@ function openSettingsTab() {
   if (!srv) return;
   document.getElementById('tsett-name').value = srv.name || '';
   setRamDropdown('tsett', srv.ram || '2G');
+  document.getElementById('tsett-heap').value = srv.heap || '';
+  updateHeapPlaceholder('tsett');
   document.getElementById('tsett-storage').value = srv.storageLimit || '';
   document.getElementById('tsett-port').value = srv.port || '';
   document.getElementById('tsett-group').value = srv.group || '';
@@ -1781,6 +1915,7 @@ function openSettingsTab() {
   populateJdkSelect('tsett', 'tsett-java-path', srv.javaPath || 'java');
   const proxyBtnRow = document.getElementById('tsett-proxy-btn-row');
   if (proxyBtnRow) proxyBtnRow.classList.toggle('hidden', !PAPER_SOFTWARES.has(srv.software));
+  renderProxyLink(srv);
 }
 
 async function saveTabSettings() {
@@ -1788,6 +1923,13 @@ async function saveTabSettings() {
   if (!name) { toast('Server name is required', 'error'); return; }
   const ram = getRamValue('tsett');
   if (!ram) { toast('Please enter a custom RAM value', 'error'); return; }
+  const heapRaw = document.getElementById('tsett-heap').value.trim();
+  const heapErr = heapError(heapRaw, ram);
+  if (heapErr) { toast(heapErr, 'error'); return; }
+  // Saved straight into the config (not via the CLI), and it becomes -Xmx
+  // as-is - so store the "4G" / "2048M" form Java accepts, never "4GB".
+  const heapMb = ramToMb(heapRaw);
+  const heap = heapMb ? (heapMb % 1024 === 0 ? `${heapMb / 1024}G` : `${heapMb}M`) : null;
   const storageLimit = document.getElementById('tsett-storage').value.trim() || null;
   const port = parseInt(document.getElementById('tsett-port').value) || null;
   const group = document.getElementById('tsett-group').value.trim() || null;
@@ -1801,7 +1943,8 @@ async function saveTabSettings() {
   const deviceErr = validateRamAndStorage(ram, storageLimit);
   if (deviceErr) { toast(deviceErr, 'error'); return; }
 
-  const updates = { name, ram, storageLimit, port, group, javaArgs, javaPath };
+  const updates = { name, ram, heap, storageLimit, port, group, javaArgs, javaPath };
+  const oldPort = config.servers.find(s => s.id === currentServerId)?.port;
   const r = await window.mcpanel.updateServer(currentServerId, updates);
   if (r && r.error) { toast(r.error, 'error'); return; }
 
@@ -1821,6 +1964,7 @@ async function saveTabSettings() {
 
   toast('Settings saved', 'success');
   switchDetailTab('console');
+  offerProxyPortSync(currentServerId, oldPort);
 }
 
 async function browseJavaTabSettings() {
@@ -1830,37 +1974,52 @@ async function browseJavaTabSettings() {
 
 const MODDED_SOFTWARES = new Set(['fabric']);
 const PLUGIN_SOFTWARES = new Set(['paper', 'purpur', 'folia', 'leaf', 'spigot', 'velocity']);
+const PLUGIN_PLATFORM_NAMES = { modrinth: 'Modrinth', hangar: 'Hangar', spigotmc: 'SpigotMC' };
 
 let _serverPluginProvider = 'hangar';
 let _profilePluginProvider = 'hangar';
 let _pluginSearchTimer = null;
-let _pluginInstalledMap = {}; // key: `server_${id}` or `profile_${id}` → { slug: relPath }
+// key: `server_${id}` or `profile_${id}` → { 'platform:id': record }. The
+// records come from mcpanel-cli's `plugins list`, i.e. the .list/*.toml files
+// it keeps next to the jars, so the installed state survives restarts.
+let _pluginInstalledMap = {};
+let _pluginBusy = {};        // key: `${ctx}|${pkey}` → button label while an install/update/uninstall runs
 let _pluginPageState = {};   // key: ctx → { provider, query, offset, software, mcVersion }
-let _pluginDetailCache = {}; // key: ctx → { slug: <raw search result row> }
-let _pluginDetailState = null; // { ctx, slug, row, offset } for the currently-open details modal
+let _pluginDetailCache = {}; // key: ctx → { pkey: <raw search result row> }
+let _pluginDetailState = null; // { ctx, pkey, row, offset } for the currently-open details modal
 
 function _pluginCtxKey(ctx) {
   return ctx === 'server' ? `server_${currentServerId}` : `profile_${currentProfileId}`;
 }
-function _isPluginInstalled(ctx, slug) {
-  return !!(_pluginInstalledMap[_pluginCtxKey(ctx)]?.[slug]);
+function _pluginKey(platform, slug) {
+  return `${platform}:${String(slug).toLowerCase()}`;
 }
-function _markPluginInstalled(ctx, slug, relPath) {
-  const k = _pluginCtxKey(ctx);
-  if (!_pluginInstalledMap[k]) _pluginInstalledMap[k] = {};
-  _pluginInstalledMap[k][slug] = relPath;
+function _pluginTarget(ctx) {
+  return ctx === 'server' ? { serverId: currentServerId } : { profileId: currentProfileId };
 }
-function _markPluginUninstalled(ctx, slug) {
-  const k = _pluginCtxKey(ctx);
-  if (_pluginInstalledMap[k]) delete _pluginInstalledMap[k][slug];
+function _installedPlugin(ctx, pkey) {
+  return _pluginInstalledMap[_pluginCtxKey(ctx)]?.[pkey] || null;
 }
 
 function _pluginTabLabel(software) {
   return MODDED_SOFTWARES.has(software) ? 'Mods' : 'Plugins';
 }
 
-function _pluginDestDir(software) {
-  return MODDED_SOFTWARES.has(software) ? 'mods' : 'plugins';
+function _pluginKind(ctx) {
+  return MODDED_SOFTWARES.has(_pluginCtxSoftware(ctx).software) ? 'mod' : 'plugin';
+}
+
+async function _loadInstalledPlugins(ctx) {
+  const k = _pluginCtxKey(ctx);
+  try {
+    const r = await window.mcpanel.listPlugins(_pluginTarget(ctx));
+    if (r && !r.error) {
+      const map = {};
+      (r.plugins || []).forEach(p => { map[_pluginKey(p.platform, p.id)] = p; });
+      _pluginInstalledMap[k] = map;
+    }
+  } catch { /* keep whatever was known - the buttons just fall back to Install */ }
+  if (k === _pluginCtxKey(ctx)) _refreshPluginRows(ctx);
 }
 
 function openServerPluginsTab() {
@@ -1869,8 +2028,7 @@ function openServerPluginsTab() {
   const label = _pluginTabLabel(srv.software);
   document.getElementById('dtab-plugins-label').textContent = label;
   _setupPluginProviders(srv.software, 'server');
-  const listEl = document.getElementById('server-plugin-list');
-  if (listEl.querySelector('.plugin-state-msg')) return;
+  _loadInstalledPlugins('server');
 }
 
 function openProfilePluginsTab() {
@@ -1880,6 +2038,7 @@ function openProfilePluginsTab() {
   const label = _pluginTabLabel(software);
   document.getElementById('ptab-plugins-label').textContent = label;
   _setupPluginProviders(software, 'profile');
+  _loadInstalledPlugins('profile');
 }
 
 function _setupPluginProviders(software, ctx) {
@@ -1889,6 +2048,7 @@ function _setupPluginProviders(software, ctx) {
   if (hangarBtn) hangarBtn.classList.toggle('hidden', isMod);
   if (spigotBtn) spigotBtn.classList.toggle('hidden', isMod);
   const defaultProvider = isMod ? 'modrinth' : 'hangar';
+  delete _pluginPageState[ctx]; // a stale "installed" view must not re-render into a new server's tab
   if (ctx === 'server') _serverPluginProvider = defaultProvider;
   else _profilePluginProvider = defaultProvider;
   document.querySelectorAll(`#${ctx === 'server' ? 'server' : 'profile'}-plugin-providers .plugin-provider-tab`)
@@ -1908,16 +2068,28 @@ function pluginSearchDebounce(ctx) {
   _pluginSearchTimer = setTimeout(() => searchPlugins(ctx), 400);
 }
 
+function _pluginCtxSoftware(ctx) {
+  const srv = ctx === 'server' ? config.servers.find(s => s.id === currentServerId) : null;
+  const profile = ctx === 'profile' ? profiles.find(p => p.id === currentProfileId) : null;
+  return {
+    software: srv?.software || (profile?.software?.[0]) || 'paper',
+    mcVersion: srv?.version || (profile?.versions?.[0]) || '',
+  };
+}
+
 async function searchPlugins(ctx, append = false) {
   const query = (document.getElementById(`${ctx}-plugin-search`)?.value || '').trim();
   const provider = ctx === 'server' ? _serverPluginProvider : _profilePluginProvider;
   const listEl = document.getElementById(`${ctx}-plugin-list`);
   if (!listEl) return;
 
-  const srv = ctx === 'server' ? config.servers.find(s => s.id === currentServerId) : null;
-  const profile = ctx === 'profile' ? profiles.find(p => p.id === currentProfileId) : null;
-  const software = srv?.software || (profile?.software?.[0]) || 'paper';
-  const mcVersion = srv?.version || (profile?.versions?.[0]) || '';
+  const { software, mcVersion } = _pluginCtxSoftware(ctx);
+
+  if (provider === 'installed') {
+    _pluginPageState[ctx] = { provider, query, software, mcVersion, offset: 0 };
+    _renderInstalledPlugins(ctx);
+    return;
+  }
 
   const PAGE_SIZE = 100;
 
@@ -1939,18 +2111,19 @@ async function searchPlugins(ctx, append = false) {
   try {
     const { results, hasMore } = await _searchViaCli(state.provider, state.query,
       { software: state.software, mcVersion: state.mcVersion }, PAGE_SIZE, requestOffset);
+    if (_pluginPageState[ctx] !== state) return; // provider switched while awaiting
     state.offset = requestOffset + results.length;
-    results.forEach(r => { _pluginDetailCache[ctx][r.slug] = r; });
+    results.forEach(r => { _pluginDetailCache[ctx][_pluginKey(r.platform, r.slug)] = r; });
 
     if (!append) {
       if (!results.length) {
         listEl.innerHTML = `<div class="plugin-state-msg">No results for "${escapeHtml(state.query || 'featured')}".</div>`;
         return;
       }
-      listEl.innerHTML = results.map(r => _renderPluginRow(r, ctx, state.software)).join('');
+      listEl.innerHTML = results.map(r => _renderPluginRow(r, ctx)).join('');
     } else {
       listEl.querySelector('.plugin-loading-more')?.remove();
-      results.forEach(r => listEl.insertAdjacentHTML('beforeend', _renderPluginRow(r, ctx, state.software)));
+      results.forEach(r => listEl.insertAdjacentHTML('beforeend', _renderPluginRow(r, ctx)));
     }
 
     if (hasMore) {
@@ -1971,6 +2144,50 @@ async function searchPlugins(ctx, append = false) {
 
 function _loadMorePlugins(ctx) { searchPlugins(ctx, true); }
 
+// The "Installed" tab lists the .list records instead of searching a platform.
+function _renderInstalledPlugins(ctx) {
+  const listEl = document.getElementById(`${ctx}-plugin-list`);
+  const state = _pluginPageState[ctx];
+  if (!listEl || !state) return;
+  const q = (state.query || '').toLowerCase();
+  const recs = Object.values(_pluginInstalledMap[_pluginCtxKey(ctx)] || {})
+    .filter(p => !q || String(p.name).toLowerCase().includes(q) || String(p.id).toLowerCase().includes(q))
+    .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  _pluginDetailCache[ctx] = {};
+  if (!recs.length) {
+    const kind = MODDED_SOFTWARES.has(state.software) ? 'mods' : 'plugins';
+    listEl.innerHTML = `<div class="plugin-state-msg">${q
+      ? `No installed ${kind} match "${escapeHtml(state.query)}".`
+      : `No ${kind} installed through MCPanel yet.`}</div>`;
+    return;
+  }
+  const rows = recs.map(p => ({
+    slug: p.id, platform: p.platform, name: p.name || p.id,
+    author: PLUGIN_PLATFORM_NAMES[p.platform] || p.platform,
+    ownerName: p.owner || '', description: p.filename,
+    latestVersion: p.version, dependencies: p.dependencies || [],
+  }));
+  rows.forEach(r => { _pluginDetailCache[ctx][_pluginKey(r.platform, r.slug)] = r; });
+  listEl.innerHTML = rows.map(r => _renderPluginRow(r, ctx, true)).join('');
+}
+
+// Re-draw the action buttons after the installed state changed (or the whole
+// list, on the Installed tab, where rows come and go).
+function _refreshPluginRows(ctx) {
+  if (_pluginPageState[ctx]?.provider === 'installed') { _renderInstalledPlugins(ctx); }
+  else {
+    document.querySelectorAll(`#${ctx}-plugin-list [data-pacts]`).forEach(el => {
+      const pkey = el.dataset.pacts.slice(ctx.length + 1);
+      const row = _pluginDetailCache[ctx]?.[pkey];
+      if (row) el.outerHTML = _renderPluginActions(row, ctx);
+    });
+  }
+  const detail = document.getElementById('pdetail-plugin-actions');
+  if (detail && _pluginDetailState?.ctx === ctx) {
+    detail.innerHTML = _renderPluginActions(_pluginDetailState.row, ctx, true);
+  }
+}
+
 function _fmtDownloads(n) {
   if (!n) return '0';
   if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
@@ -1983,69 +2200,79 @@ function _fmtDate(iso) {
   try { return new Date(iso).toLocaleDateString(); } catch { return ''; }
 }
 
-function _renderPluginRow(r, ctx, software) {
-  const isInstalled = _isPluginInstalled(ctx, r.slug);
-  const btnId = `pibtn-${ctx}-${r.slug.replace(/[^a-zA-Z0-9]/g, '_')}`;
+// Spiget resources hosted externally usually redirect to a human-facing
+// release page rather than a jar - those can't be auto-installed. A few
+// do link straight to a .jar file (e.g. a GitHub release asset) and are
+// still safe to install directly, matching the same check the CLI backend
+// makes in plugins.get_spiget_download. Purchase-required (premium) Spiget
+// resources never reach here at all - the CLI filters them out of results.
+function _isBlockedExternal(r) {
+  return !!r.external && !(r.externalUrl && r.externalUrl.toLowerCase().split('?')[0].endsWith('.jar'));
+}
+
+// Install, or Update + Uninstall once installed. `inModal` stacks them for the
+// details modal. The wrapper's data-pacts ("ctx|platform:id") is how
+// _pluginAction and _refreshPluginRows find the row again.
+function _renderPluginActions(r, ctx, inModal = false) {
+  const pkey = _pluginKey(r.platform, r.slug);
+  const busy = _pluginBusy[`${ctx}|${pkey}`];
+  let inner;
+  if (busy) {
+    inner = `<button class="plugin-install-btn installing" disabled>${escapeHtml(busy)}</button>`;
+  } else if (_isBlockedExternal(r)) {
+    inner = r.externalUrl
+      ? `<button class="plugin-install-btn" onclick="window.mcpanel.openExternal('${escapeHtml(r.externalUrl)}')">View Page</button>`
+      : `<button class="plugin-install-btn" onclick="toast('This plugin is hosted externally - check its SpigotMC resource page','info')">View Page</button>`;
+  } else if (_installedPlugin(ctx, pkey)) {
+    const rec = _installedPlugin(ctx, pkey);
+    inner = `<button class="plugin-install-btn" onclick="_pluginAction('update','${ctx}',this)" title="Installed: ${escapeHtml(rec.version || '?')} - update to the newest compatible version">Update</button>`
+      + `<button class="plugin-install-btn uninstall" onclick="_pluginAction('uninstall','${ctx}',this)" title="Delete ${escapeHtml(rec.path || rec.filename)}">Uninstall</button>`;
+  } else {
+    inner = `<button class="plugin-install-btn" onclick="_pluginAction('install','${ctx}',this)">Install</button>`;
+  }
+  return inModal ? `<div class="plugin-actions stacked" data-pacts="${escapeHtml(`${ctx}|${pkey}`)}">${inner}</div>`
+    : `<div class="plugin-actions" data-pacts="${escapeHtml(`${ctx}|${pkey}`)}" onclick="event.stopPropagation()">${inner}</div>`;
+}
+
+function _renderPluginRow(r, ctx, installedView = false) {
+  const pkey = _pluginKey(r.platform, r.slug);
   const icon = r.iconUrl
     ? `<img class="plugin-icon" src="${escapeHtml(r.iconUrl)}" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`
         + `<div class="plugin-icon-placeholder" style="display:none"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5z"/><line x1="16" y1="8" x2="2" y2="22"/></svg></div>`
     : `<div class="plugin-icon-placeholder"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5z"/><line x1="16" y1="8" x2="2" y2="22"/></svg></div>`;
-  // Spiget resources hosted externally usually redirect to a human-facing
-  // release page rather than a jar - those can't be auto-installed. A few
-  // do link straight to a .jar file (e.g. a GitHub release asset) and are
-  // still safe to install directly, matching the same check the CLI backend
-  // makes in plugins.get_spiget_download. Purchase-required (premium) Spiget
-  // resources never reach here at all - the CLI filters them out of results.
-  const isBlockedExternal = !!r.external &&
-    !(r.externalUrl && r.externalUrl.toLowerCase().split('?')[0].endsWith('.jar'));
-  const externalBadge = isBlockedExternal ? `<span class="plugin-external-badge">EXTERNAL</span>` : '';
-  const dataAttrs = `data-slug="${escapeHtml(r.slug)}" data-platform="${escapeHtml(r.platform)}" data-name="${escapeHtml(r.name)}" data-author="${escapeHtml(r.author)}" data-owner="${escapeHtml(r.ownerName || '')}" data-ctx="${ctx}" data-software="${escapeHtml(software)}" data-external-url="${escapeHtml(r.externalUrl || '')}"`;
-  let btnClass, btnText, btnOnclick;
-  if (isBlockedExternal) {
-    btnClass = 'plugin-install-btn'; btnText = 'View Page';
-    btnOnclick = r.externalUrl
-      ? `onclick="event.stopPropagation();window.mcpanel.openExternal('${escapeHtml(r.externalUrl)}')"`
-      : `onclick="event.stopPropagation();toast('This plugin is hosted externally - check its SpigotMC resource page','info')"`;
-  } else if (isInstalled) {
-    btnClass = 'plugin-install-btn installed'; btnText = 'Installed';
-    btnOnclick = `onclick="event.stopPropagation();_pluginBtnClick(this)" title="Click to remove"`;
-  } else {
-    btnClass = 'plugin-install-btn'; btnText = 'Install';
-    btnOnclick = `onclick="event.stopPropagation();_pluginBtnClick(this)"`;
-  }
-  return `<div class="plugin-row clickable" onclick="_openPluginDetails('${ctx}','${escapeHtml(r.slug)}')">
+  const externalBadge = _isBlockedExternal(r) ? `<span class="plugin-external-badge">EXTERNAL</span>` : '';
+  const meta = installedView
+    ? `${r.latestVersion ? `<span class="plugin-meta-version">${escapeHtml(r.latestVersion)}</span>` : ''}
+      ${r.dependencies?.length ? `<span class="plugin-meta-updated" title="Required dependencies">needs ${escapeHtml(r.dependencies.join(', '))}</span>` : ''}`
+    : `<span class="plugin-meta-downloads">⬇ ${_fmtDownloads(r.downloads)}</span>
+      ${r.latestVersion ? `<span class="plugin-meta-version">${escapeHtml(r.latestVersion)}</span>` : ''}
+      ${r.updatedAt ? `<span class="plugin-meta-updated">${_fmtDate(r.updatedAt)}</span>` : ''}`;
+  return `<div class="plugin-row clickable" data-pkey="${escapeHtml(pkey)}" onclick="_openPluginDetails('${ctx}',this.dataset.pkey)">
     ${icon}
     <div class="plugin-info">
       <div class="plugin-name">${escapeHtml(r.name)}${externalBadge}</div>
-      <div class="plugin-author">by ${escapeHtml(r.author)}</div>
+      <div class="plugin-author">${installedView ? 'from' : 'by'} ${escapeHtml(r.author)}</div>
       ${r.description ? `<div class="plugin-desc">${escapeHtml(r.description)}</div>` : ''}
     </div>
     <div class="plugin-meta">
-      <span class="plugin-meta-downloads">⬇ ${_fmtDownloads(r.downloads)}</span>
-      ${r.latestVersion ? `<span class="plugin-meta-version">${escapeHtml(r.latestVersion)}</span>` : ''}
-      ${r.updatedAt ? `<span class="plugin-meta-updated">${_fmtDate(r.updatedAt)}</span>` : ''}
+      ${meta}
     </div>
-    <button class="${btnClass}" id="${btnId}" ${btnOnclick} ${dataAttrs}>${btnText}</button>
+    ${_renderPluginActions(r, ctx)}
   </div>`;
 }
 
-function _pluginBtnClick(btn) {
-  const ctx = btn.dataset.ctx;
-  const software = btn.dataset.software;
-  if (_isPluginInstalled(ctx, btn.dataset.slug)) {
-    removePlugin(btn, ctx);
-  } else {
-    installPlugin({
-      slug: btn.dataset.slug, platform: btn.dataset.platform,
-      name: btn.dataset.name, author: btn.dataset.author,
-      ownerName: btn.dataset.owner,
-      externalUrl: btn.dataset.externalUrl || null,
-    }, ctx, software);
-  }
+function _pluginAction(op, ctx, btn) {
+  const pkey = btn.closest('[data-pacts]').dataset.pacts.slice(ctx.length + 1);
+  const row = _pluginDetailCache[ctx]?.[pkey]
+    || (_pluginDetailState?.pkey === pkey ? _pluginDetailState.row : null);
+  if (!row) return;
+  if (op === 'install') installPlugin(row, ctx);
+  else if (op === 'update') updatePlugin(row, ctx);
+  else if (op === 'uninstall') uninstallPlugin(row, ctx);
 }
 
-function _openPluginDetails(ctx, slug) {
-  const row = _pluginDetailCache[ctx]?.[slug];
+function _openPluginDetails(ctx, pkey) {
+  const row = _pluginDetailCache[ctx]?.[pkey];
   if (!row) return;
 
   document.getElementById('pdetail-name').textContent = row.name;
@@ -2062,17 +2289,8 @@ function _openPluginDetails(ctx, slug) {
   websiteBtn.onclick = null;
   websiteBtn.disabled = true;
 
-  const srv = ctx === 'server' ? config.servers.find(s => s.id === currentServerId) : null;
-  const software = srv?.software || row.software || 'paper';
-  const isInstalled = _isPluginInstalled(ctx, slug);
-  const installBtn = document.getElementById('pdetail-install-btn');
-  installBtn.dataset.slug = slug;
-  installBtn.textContent = isInstalled ? 'Installed' : 'Install';
-  installBtn.disabled = false;
-  installBtn.className = isInstalled ? 'plugin-install-btn installed' : 'plugin-install-btn';
-  installBtn.onclick = () => _installFromDetailModal(installBtn, row, ctx, software);
-
-  _pluginDetailState = { ctx, slug, row, software, offset: 0 };
+  _pluginDetailState = { ctx, pkey, slug: row.slug, row, offset: 0 };
+  document.getElementById('pdetail-plugin-actions').innerHTML = _renderPluginActions(row, ctx, true);
   openModal('modal-plugin-details');
   _loadPluginInfo(false);
 }
@@ -2155,30 +2373,12 @@ function _installPluginVersion(row, versionId) {
   const originalName = row.querySelector('.plugin-version-name').textContent;
   row.classList.add('installing');
   row.querySelector('.plugin-version-name').textContent = 'Installing…';
-  // Pass the top-level Install button as an override so it also reflects the
-  // (just-changed) installed state, matching what installing from the row's
-  // own button already does.
-  const installBtn = _pluginDetailState === state ? document.getElementById('pdetail-install-btn') : null;
-  installPlugin(state.row, state.ctx, state.software, versionId, installBtn).finally(() => {
+  installPlugin(state.row, state.ctx, versionId).finally(() => {
     if (row.isConnected) {
       row.classList.remove('installing');
       row.querySelector('.plugin-version-name').textContent = originalName;
     }
   });
-}
-
-function _installFromDetailModal(btn, row, ctx, software) {
-  if (_isPluginInstalled(ctx, row.slug)) {
-    removePlugin(btn, ctx).then(() => {
-      // Keep the row behind the modal (if still rendered) in sync too.
-      const rowBtn = document.getElementById(`pibtn-${ctx}-${row.slug.replace(/[^a-zA-Z0-9]/g, '_')}`);
-      if (rowBtn && !_isPluginInstalled(ctx, row.slug)) {
-        rowBtn.textContent = 'Install'; rowBtn.disabled = false; rowBtn.className = 'plugin-install-btn';
-      }
-    });
-  } else {
-    installPlugin(row, ctx, software, undefined, btn);
-  }
 }
 
 // Search is routed through mcpanel-cli's own `search plugins` API instead of
@@ -2189,91 +2389,175 @@ async function _searchViaCli(platform, query, { software, mcVersion } = {}, limi
   return { results: data.results || [], hasMore: !!data.hasMore };
 }
 
-async function installPlugin(pluginData, ctx, software, versionId, btnOverride) {
-  const serverId = ctx === 'server' ? currentServerId : null;
-  const profileId = ctx === 'profile' ? currentProfileId : null;
-  if (!serverId && !profileId) return;
+// ─── Third-party disclaimer (plugins/mods + addons) ──────────────────────────
+// Accepting hides the disclaimer for 15 minutes; ticking "Don't show this
+// again" hides it for good. Remembered per browser / app install, per topic
+// ('plugins', 'addons'). The wording itself comes from the CLI's
+// `disclaimer_required` reply.
+const DISCLAIMER_SNOOZE_MS = 15 * 60 * 1000;
+let _pluginDisclaimerResolve = null;
 
-  const btnId = `pibtn-${ctx}-${pluginData.slug.replace(/[^a-zA-Z0-9]/g, '_')}`;
-  const rowBtn = document.getElementById(btnId);
-  const btns = [...new Set([rowBtn, btnOverride].filter(Boolean))];
-  const setBtns = (text, disabled, cls) => btns.forEach(b => {
-    b.textContent = text; b.disabled = disabled; b.className = cls;
-  });
-  setBtns('Installing', true, 'plugin-install-btn installing');
-
-  const srv = serverId ? config.servers.find(s => s.id === serverId) : null;
-  const effectiveSoftware = software || srv?.software || 'paper';
-  const mcVersion = srv?.version || '';
-  const destDir = _pluginDestDir(effectiveSoftware);
-
-  // If a different version of this plugin is already installed, its filename
-  // (e.g. embeds a version number) usually differs from the one we're about
-  // to write - remove it first so switching versions doesn't leave the old
-  // jar sitting alongside the new one (both would get loaded by the server).
-  const existingRelPath = _pluginInstalledMap[_pluginCtxKey(ctx)]?.[pluginData.slug];
-  if (existingRelPath) {
-    try {
-      if (serverId) await window.mcpanel.deleteServerFile(serverId, existingRelPath);
-      else await window.mcpanel.deleteProfileFile(profileId, existingRelPath);
-    } catch { /* best-effort - proceed with install regardless */ }
-  }
-
-  toast(`Installing ${pluginData.name}…`, 'info');
+function disclaimerSuppressed(topic) {
   try {
-    // mcpanel-cli's `install plugin` resolves the download (including Hangar's
-    // owner lookup and Spiget's external/non-jar checks) and writes the file
-    // itself - no separate URL-resolution step needed here.
-    const result = await window.mcpanel.installPlugin(pluginData.platform, pluginData.slug, {
-      serverId, profileId, mcVersion,
-      owner: pluginData.ownerName || pluginData.author,
-      versionId,
-    });
-    if (result?.error) {
-      toast('Install failed: ' + result.error, 'error');
-      if (existingRelPath) _markPluginUninstalled(ctx, pluginData.slug); // old file was already removed above
-      setBtns('Install', false, 'plugin-install-btn');
-    } else {
-      const relPath = `${destDir}/${result.filename}`;
-      toast(`Installed ${pluginData.name} → ${relPath}`, 'success');
-      _markPluginInstalled(ctx, pluginData.slug, relPath);
-      setBtns('Installed', false, 'plugin-install-btn installed');
-    }
-  } catch (e) {
-    toast('Install failed: ' + e.message, 'error');
-    if (existingRelPath) _markPluginUninstalled(ctx, pluginData.slug);
-    setBtns('Install', false, 'plugin-install-btn');
+    const rec = JSON.parse(localStorage.getItem(`mcpanel-disclaimer-${topic}`) || 'null');
+    return !!rec && (rec.hidden === true || Number(rec.until) > Date.now());
+  } catch { return false; }
+}
+
+function rememberDisclaimer(topic, forever) {
+  try {
+    localStorage.setItem(`mcpanel-disclaimer-${topic}`,
+      JSON.stringify(forever ? { hidden: true } : { until: Date.now() + DISCLAIMER_SNOOZE_MS }));
+  } catch {}
+}
+
+function askPluginDisclaimer(doc) {
+  if (_pluginDisclaimerResolve) resolvePluginDisclaimer(false);
+  const kind = doc.kind === 'mod' ? 'Mod' : 'Plugin';
+  document.getElementById('plugin-disclaimer-title').textContent = `Third-party ${kind.toLowerCase()}`;
+  document.getElementById('plugin-disclaimer-text').textContent = doc.disclaimer || doc.error;
+
+  const deps = doc.dependencies || [];
+  document.getElementById('plugin-disclaimer-deps').classList.toggle('hidden', !deps.length);
+  document.getElementById('plugin-disclaimer-deps-list').innerHTML = deps.map(d =>
+    `<li><span>${escapeHtml(d.name)}</span><span class="plugin-dep-version">${escapeHtml(d.version || '')}</span></li>`).join('');
+
+  const missing = doc.missingDependencies || [];
+  document.getElementById('plugin-disclaimer-missing').classList.toggle('hidden', !missing.length);
+  document.getElementById('plugin-disclaimer-missing-list').innerHTML = missing.map(d =>
+    `<li>${escapeHtml(d.name)} <span class="plugin-dep-version">(${escapeHtml(d.reason || 'manual install')})</span></li>`).join('');
+
+  const tos = document.getElementById('plugin-disclaimer-tos');
+  tos.classList.toggle('hidden', !doc.tos);
+  tos.textContent = `Read ${doc.platformName || 'the platform'}'s terms`;
+  tos.onclick = () => doc.tos && window.mcpanel.openExternal(doc.tos);
+  document.getElementById('plugin-disclaimer-skip').checked = false;
+  openModal('modal-plugin-disclaimer');
+  return new Promise(resolve => { _pluginDisclaimerResolve = resolve; });
+}
+
+function resolvePluginDisclaimer(ok) {
+  closeModal('modal-plugin-disclaimer');
+  if (ok) rememberDisclaimer('plugins', document.getElementById('plugin-disclaimer-skip').checked);
+  const resolve = _pluginDisclaimerResolve;
+  _pluginDisclaimerResolve = null;
+  if (resolve) resolve(ok);
+}
+
+document.addEventListener('keydown', e => {
+  if (_pluginDisclaimerResolve && e.key === 'Escape') resolvePluginDisclaimer(false);
+});
+
+// ─── Install / update / uninstall ─────────────────────────────────────────────
+// mcpanel-cli does the real work: it resolves the download (including
+// Hangar's owner lookup and Spiget's external/non-jar checks), installs
+// missing required dependencies, swaps out the jar of a previously installed
+// version and keeps the .list records - the UI only reloads `plugins list`.
+
+function _setPluginBusy(ctx, pkey, label) {
+  if (label) _pluginBusy[`${ctx}|${pkey}`] = label;
+  else delete _pluginBusy[`${ctx}|${pkey}`];
+  _refreshPluginRows(ctx);
+}
+
+function _toastDependencyResult(result) {
+  const failed = result.failedDependencies || [];
+  const missing = result.missingDependencies || [];
+  failed.forEach(d => toast(`Dependency ${d.name} failed: ${d.error}`, 'error'));
+  if (missing.length) {
+    toast(`Install manually: ${missing.map(d => d.name).join(', ')} (required, but not available on ${PLUGIN_PLATFORM_NAMES[result.platform] || result.platform})`, 'info');
   }
 }
 
-async function removePlugin(btn, ctx) {
-  const slug = btn.dataset.slug;
-  const k = _pluginCtxKey(ctx);
-  const relPath = _pluginInstalledMap[k]?.[slug];
-  if (!relPath) return;
+async function installPlugin(pluginData, ctx, versionId) {
+  const target = _pluginTarget(ctx);
+  if (!target.serverId && !target.profileId) return;
+  const pkey = _pluginKey(pluginData.platform, pluginData.slug);
+  const { mcVersion } = _pluginCtxSoftware(ctx);
+  const opts = {
+    ...target,
+    mcVersion: ctx === 'server' ? mcVersion : '',
+    owner: pluginData.ownerName || pluginData.author,
+    versionId,
+  };
+
+  _setPluginBusy(ctx, pkey, 'Installing…');
+  try {
+    let result = await window.mcpanel.installPlugin(pluginData.platform, pluginData.slug,
+      { ...opts, yes: disclaimerSuppressed('plugins') });
+    if (result?.code === 'disclaimer_required') {
+      if (!(await askPluginDisclaimer(result))) return;
+      result = await window.mcpanel.installPlugin(pluginData.platform, pluginData.slug, { ...opts, yes: true });
+    }
+    if (result?.error) {
+      toast('Install failed: ' + result.error, 'error');
+      return;
+    }
+    const deps = result.dependencies || [];
+    toast(`Installed ${result.name || pluginData.name} → ${result.relPath || result.filename}`
+      + (deps.length ? ` (+ ${deps.map(d => d.name).join(', ')})` : ''), 'success');
+    _toastDependencyResult(result);
+    await _loadInstalledPlugins(ctx);
+  } catch (e) {
+    toast('Install failed: ' + e.message, 'error');
+  } finally {
+    _setPluginBusy(ctx, pkey, null);
+  }
+}
+
+async function updatePlugin(pluginData, ctx) {
+  const pkey = _pluginKey(pluginData.platform, pluginData.slug);
+  const rec = _installedPlugin(ctx, pkey);
+  if (!rec) return;
+  _setPluginBusy(ctx, pkey, 'Updating…');
+  try {
+    const result = await window.mcpanel.updatePlugin(rec.platform, rec.id, _pluginTarget(ctx));
+    if (result?.error) {
+      toast('Update failed: ' + result.error, 'error');
+    } else if (result.unchanged) {
+      toast(result.message || `${rec.name} is already up to date`, 'info');
+    } else {
+      const deps = result.dependencies || [];
+      toast(`Updated ${result.name}: ${result.previousVersion || '?'} → ${result.version || '?'}`
+        + (deps.length ? ` (+ ${deps.map(d => d.name).join(', ')})` : ''), 'success');
+      _toastDependencyResult(result);
+      await _loadInstalledPlugins(ctx);
+    }
+  } catch (e) {
+    toast('Update failed: ' + e.message, 'error');
+  } finally {
+    _setPluginBusy(ctx, pkey, null);
+  }
+}
+
+async function uninstallPlugin(pluginData, ctx) {
+  const pkey = _pluginKey(pluginData.platform, pluginData.slug);
+  const rec = _installedPlugin(ctx, pkey);
+  if (!rec) return;
+  const kind = _pluginKind(ctx) === 'mod' ? 'Mod' : 'Plugin';
+  const neededBy = Object.values(_pluginInstalledMap[_pluginCtxKey(ctx)] || {})
+    .filter(p => p !== rec && (p.dependencies || []).some(d => String(d).toLowerCase() === String(rec.id).toLowerCase()))
+    .map(p => p.name);
   const ok = await confirmDialog({
-    title: 'Remove Plugin',
-    message: `Remove "${btn.dataset.name || slug}"?\n\nThis deletes ${relPath} from disk and cannot be undone.`,
-    confirmLabel: 'Remove Plugin',
+    title: `Uninstall ${kind}`,
+    message: `Uninstall "${rec.name}"?\n\nThis deletes ${rec.path} from disk and cannot be undone.`
+      + (neededBy.length ? `\n\nRequired by: ${neededBy.join(', ')}` : ''),
+    confirmLabel: 'Uninstall',
   });
   if (!ok) return;
-  btn.textContent = 'Removing…';
-  btn.disabled = true;
+  _setPluginBusy(ctx, pkey, 'Removing…');
   try {
-    if (ctx === 'server') {
-      await window.mcpanel.deleteServerFile(currentServerId, relPath);
+    const result = await window.mcpanel.uninstallPlugin(rec.platform, rec.id, _pluginTarget(ctx));
+    if (result?.error) {
+      toast('Uninstall failed: ' + result.error, 'error');
     } else {
-      await window.mcpanel.deleteProfileFile(currentProfileId, relPath);
+      delete _pluginInstalledMap[_pluginCtxKey(ctx)]?.[pkey];
+      toast(`${rec.name} uninstalled`, 'info');
     }
-    _markPluginUninstalled(ctx, slug);
-    toast('Plugin removed', 'info');
-    btn.textContent = 'Install';
-    btn.disabled = false;
-    btn.className = 'plugin-install-btn';
   } catch (e) {
-    toast('Remove failed: ' + e, 'error');
-    btn.textContent = 'Installed';
-    btn.disabled = false;
+    toast('Uninstall failed: ' + e.message, 'error');
+  } finally {
+    _setPluginBusy(ctx, pkey, null);
   }
 }
 
@@ -2347,12 +2631,123 @@ async function linkToVelocityProxy(btn) {
     } else {
       toast('Server linked to Velocity proxy!', 'success');
       closeModal('modal-velocity-link');
+      // The CLI saved the link to config.json; mirror it so the UI updates.
+      const srv = config.servers.find(s => s.id === currentServerId);
+      if (srv) {
+        srv.velocityLink = { velocityId, serverName: result.serverName || serverName, customIp };
+        renderProxyLink(srv);
+      }
     }
   } catch (e) {
     toast('Link failed: ' + e, 'error');
   } finally {
     btn.disabled = false;
     btn.textContent = origText;
+  }
+}
+
+// Linked servers get a "Velocity Proxy" card on the console tab (proxy name
+// opens the proxy, X unlinks) and Unlink instead of Link in Settings.
+function renderProxyLink(srv) {
+  const link = srv && srv.velocityLink;
+  const linked = !!(link && typeof link === 'object');
+  const card = document.getElementById('proxy-link-card');
+  if (card) card.classList.toggle('hidden', !linked);
+  const linkBtn = document.querySelector('#tsett-proxy-btn-row > button:not(#tsett-proxy-unlink-btn)');
+  const unlinkBtn = document.getElementById('tsett-proxy-unlink-btn');
+  if (linkBtn) linkBtn.classList.toggle('hidden', linked);
+  if (unlinkBtn) unlinkBtn.classList.toggle('hidden', !linked);
+  if (!linked) return;
+
+  const proxy = config.servers.find(s => s.id === link.velocityId);
+  const openBtn = document.getElementById('proxy-link-open');
+  document.getElementById('proxy-link-name').textContent = proxy ? proxy.name : 'Missing proxy';
+  document.getElementById('proxy-link-as').textContent = link.serverName ? `as ${link.serverName}` : '';
+  openBtn.disabled = !proxy;
+  openBtn.title = proxy ? `Open ${proxy.name}` : 'The linked proxy no longer exists';
+}
+
+// A linked server's port lives in two places: its own config and its entry
+// in the proxy's velocity.toml. After a port change, ask whether the proxy
+// entry should follow (it may deliberately point elsewhere, e.g. a tunnel).
+async function offerProxyPortSync(serverId, oldPort) {
+  const srv = config.servers.find(s => s.id === serverId);
+  const link = srv && srv.velocityLink;
+  if (!link || !srv.port || srv.port === oldPort) return;
+  const proxy = config.servers.find(s => s.id === link.velocityId);
+  if (!proxy) return;
+  const ok = await confirmDialog({
+    title: 'Update proxy too?',
+    message: `"${srv.name}" is linked to "${proxy.name}" as "${link.serverName}". `
+      + `Change its address in the proxy's velocity.toml to port ${srv.port} as well?`,
+    confirmLabel: 'Update proxy',
+    cancelLabel: 'Only this server',
+    danger: false,
+  });
+  if (!ok) return;
+  try {
+    const r = await window.mcpanel.syncProxyPort(serverId);
+    if (r && r.error) { toast('Proxy not updated: ' + r.error, 'error'); return; }
+    const running = await window.mcpanel.isServerRunning(proxy.id).catch(() => false);
+    if (!running) { toast(`Proxy updated (${r.address})`, 'success'); return; }
+    toast(`Proxy updated (${r.address}) - restart "${proxy.name}" to apply it`, 'info', {
+      duration: Infinity,
+      buttons: [
+        { label: 'Later', onClick: () => {} },
+        { label: 'Restart proxy', onClick: () => restartProxyFromToast(proxy) },
+      ],
+    });
+  } catch (e) {
+    toast('Proxy not updated: ' + e, 'error');
+  }
+}
+
+async function restartProxyFromToast(proxy) {
+  toast(`Restarting "${proxy.name}"...`, 'info');
+  const r = await window.mcpanel.restartServer(proxy.id);
+  if (r && r.error) { toast(r.error, 'error'); return; }
+  if (r && r.success) {
+    startingServers.add(proxy.id);
+    if (currentServerId === proxy.id) { updateDetailControls(true); updateDetailStarting(); }
+    updateServerCardStatus(proxy.id, 'starting', 0);
+    updateSidebarDot(proxy.id, true);
+    pollAllStatuses();
+  }
+}
+
+function openLinkedProxy() {
+  const srv = config.servers.find(s => s.id === currentServerId);
+  const id = srv && srv.velocityLink && srv.velocityLink.velocityId;
+  if (id && config.servers.some(s => s.id === id)) openServerDetail(id);
+}
+
+async function unlinkFromVelocityProxy(btn) {
+  const serverId = currentServerId;
+  const srv = config.servers.find(s => s.id === serverId);
+  if (!srv || !srv.velocityLink) return;
+  const proxy = config.servers.find(s => s.id === srv.velocityLink.velocityId);
+  const ok = await confirmDialog({
+    title: 'Unlink from proxy',
+    message: `Remove "${srv.name}" from ${proxy ? `"${proxy.name}"` : 'its proxy'}? `
+      + 'Its velocity.toml entry is removed, Velocity forwarding is turned off and online-mode is set back to true.',
+    confirmLabel: 'Unlink',
+  });
+  if (!ok) return;
+
+  btn.disabled = true;
+  try {
+    const result = await window.mcpanel.unlinkFromProxy(serverId);
+    if (result && result.error) {
+      toast('Unlink failed: ' + result.error, 'error');
+      return;
+    }
+    delete srv.velocityLink;
+    if (currentServerId === serverId) renderProxyLink(srv);
+    toast('Server unlinked from Velocity proxy', 'success');
+  } catch (e) {
+    toast('Unlink failed: ' + e, 'error');
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -2473,17 +2868,23 @@ function formatCap(capStr) {
   return bytes !== null ? formatBytes(bytes) : (capStr || '-');
 }
 
-function setRamBar(usedBytes, capStr) {
+// `heapStr`: the server's heap limit, or empty for the automatic one. Once
+// usage passes the RAM cap, the limit shown is the RAM cap + heap cap.
+function setRamBar(usedBytes, capStr, heapStr) {
   const valEl = document.getElementById('detail-ram');
   const subEl = document.getElementById('detail-ram-sub');
   if (!valEl) return;
-  const capBytes = parseStorageLimit(capStr);
+  // A bare number is megabytes for RAM (parseStorageLimit would read bytes).
+  const capMb = ramToMb(capStr);
+  let capBytes = capMb ? capMb * 1048576 : parseStorageLimit(capStr);
   const used = usedBytes || 0;
   if (capBytes !== null && capBytes > 0) {
+    const heapMb = ramToMb(heapStr) || autoHeapMb(capStr);
+    if (used > capBytes && heapMb) capBytes += heapMb * 1048576;
     const pct = Math.min(100, (used / capBytes) * 100);
     setMiniCircle('detail-ram-arc', pct, pct > 90 ? 'arc-danger' : pct > 75 ? 'arc-warn' : '');
     valEl.textContent = fmtPct(pct);
-    if (subEl) subEl.textContent = `${formatBytes(used)} / ${formatCap(capStr)}`;
+    if (subEl) subEl.textContent = `${formatBytes(used)} / ${formatBytes(capBytes)}`;
   } else {
     setMiniCircle('detail-ram-arc', 0);
     valEl.textContent = used > 0 ? formatBytes(used) : '-';
@@ -2855,6 +3256,20 @@ function startConsolePoll(id) {
   consolePollInterval = setTimeout(() => _pollStep(id), 50);
 }
 
+// Marks the main pane as scrolling until it has been still for a moment, so
+// CSS can switch off hover effects that would otherwise fire on every card
+// the cursor passes while flicking through the server list.
+function setupScrollHoverGuard() {
+  const main = document.querySelector('.main');
+  if (!main) return;
+  let timer = null;
+  main.addEventListener('scroll', () => {
+    if (!timer) main.classList.add('is-scrolling');
+    clearTimeout(timer);
+    timer = setTimeout(() => { main.classList.remove('is-scrolling'); timer = null; }, 150);
+  }, { passive: true });
+}
+
 function stopConsolePoll() {
   if (consolePollInterval) { clearTimeout(consolePollInterval); consolePollInterval = null; }
 }
@@ -2897,8 +3312,12 @@ function appendConsoleLine(text, type = 'out') {
   const time = new Date().toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   const body = type === 'system' ? escapeHtml(text) : ansiToHtml(text);
   line.innerHTML = `<span class="log-time">[${time}]</span><span class="log-text">${body}</span>`;
+  if (type !== 'system') {
+    learnConsolePlayers(text.replace(/\x1b\[[0-9;]*m/g, ''));
+    linkConsolePlayers(line);
+  }
   el.appendChild(line);
-  if (consoleAutoScroll) el.scrollTop = el.scrollHeight;
+  if (consoleAutoScroll && !_consoleMenuOpen) el.scrollTop = el.scrollHeight;
 }
 
 function clearConsole() {
@@ -2906,6 +3325,140 @@ function clearConsole() {
   if (el) el.innerHTML = '';
   consoleAutoScroll = true;
   document.getElementById('autoscroll-banner').classList.add('hidden');
+}
+
+// ─── Console player names ─────────────────────────────────────────────────────
+// Names of this server's players are clickable in the console and open a menu
+// (op / whitelist / kick / ban) titled with the player's name and head. Known
+// names come from the server's player files (usercache, ops, whitelist, bans),
+// the online list, and lines like joins, logins and chat as they arrive.
+let _consolePlayers = new Map();   // lowercased → name as Minecraft prints it
+let _consolePlayerRe = null;
+// The context menu closes on any scroll, autoscroll included, so new lines
+// don't scroll the console while the player menu is open.
+let _consoleMenuOpen = false;
+
+const _CONSOLE_PLAYER_PATTERNS = [
+  /UUID of player ([A-Za-z0-9_]{3,16}) is/,
+  /\b([A-Za-z0-9_]{3,16})\[\/[^\]]+\] logged in/,
+  /\b([A-Za-z0-9_]{3,16}) (?:joined|left) the game/,
+  /\b([A-Za-z0-9_]{3,16}) lost connection/,
+  /<([A-Za-z0-9_]{3,16})>/,
+];
+
+function _addConsolePlayer(name) {
+  if (!name || !/^[A-Za-z0-9_]{3,16}$/.test(name)) return false;
+  const key = name.toLowerCase();
+  if (_consolePlayers.get(key) === name) return false;
+  _consolePlayers.set(key, name);
+  _consolePlayerRe = null;
+  return true;
+}
+
+async function seedConsolePlayers(id) {
+  _consolePlayers = new Map();
+  _consolePlayerRe = null;
+  const data = await loadPlayerData(id);
+  if (currentServerId !== id) return;
+  let added = false;
+  for (const p of [...data.players, ...data.banned]) added = _addConsolePlayer(p.name) || added;
+  // Lines already printed before the files were read get linked too.
+  if (added) document.querySelectorAll('#console-output .log-line:not(.system)').forEach(linkConsolePlayers);
+}
+
+function learnConsolePlayers(plain) {
+  for (const re of _CONSOLE_PLAYER_PATTERNS) {
+    const m = plain.match(re);
+    if (m) _addConsolePlayer(m[1]);
+  }
+  (currentOnlinePlayers || []).forEach(_addConsolePlayer);
+}
+
+// Wraps known names in the line's text nodes - never inside ansiToHtml's
+// markup, and never twice.
+function linkConsolePlayers(line) {
+  if (!_consolePlayers.size) return;
+  if (!_consolePlayerRe) {
+    const names = [..._consolePlayers.values()].sort((a, b) => b.length - a.length);
+    _consolePlayerRe = new RegExp(`(?<![A-Za-z0-9_])(${names.join('|')})(?![A-Za-z0-9_])`, 'g');
+  }
+  const textEl = line.querySelector('.log-text');
+  if (!textEl) return;
+  const walker = document.createTreeWalker(textEl, NodeFilter.SHOW_TEXT, {
+    acceptNode: n => n.parentElement.closest('.log-player') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+  });
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  for (const node of nodes) {
+    const t = node.nodeValue;
+    _consolePlayerRe.lastIndex = 0;
+    if (!_consolePlayerRe.test(t)) continue;
+    _consolePlayerRe.lastIndex = 0;
+    const frag = document.createDocumentFragment();
+    let last = 0, m;
+    while ((m = _consolePlayerRe.exec(t)) !== null) {
+      if (m.index > last) frag.appendChild(document.createTextNode(t.slice(last, m.index)));
+      const span = document.createElement('span');
+      span.className = 'log-player';
+      span.dataset.player = m[1];
+      span.textContent = m[1];
+      frag.appendChild(span);
+      last = m.index + m[1].length;
+    }
+    if (last < t.length) frag.appendChild(document.createTextNode(t.slice(last)));
+    node.replaceWith(frag);
+  }
+}
+
+function setupConsolePlayerMenu() {
+  const el = document.getElementById('console-output');
+  if (!el) return;
+  el.addEventListener('click', e => {
+    const span = e.target.closest('.log-player');
+    if (!span) return;
+    // A drag that selects text ends in a click too - leave that selection alone.
+    if (String(window.getSelection?.() || '')) return;
+    openConsolePlayerMenu(e, span.dataset.player);
+  });
+}
+
+async function openConsolePlayerMenu(e, name) {
+  const id = currentServerId;
+  if (!id) return;
+  const pos = { clientX: e.clientX, clientY: e.clientY, preventDefault() {}, stopPropagation() {} };
+  e.preventDefault();
+  e.stopPropagation();
+  // Fresh from the server's files, so the toggles match what the server has.
+  playerData = await loadPlayerData(id);
+  if (currentServerId !== id) return;
+  const p = findPlayerByName(name);
+  const enc = encodeURIComponent(p.name);
+  const off = !_isServerRunning();
+  const icon = d => `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">${d}</svg>`;
+  const items = p.banned ? [
+    { label: 'Unban', icon: icon('<path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="10"/>'), disabled: off, onClick: () => unbanPlayer(enc) },
+  ] : [
+    { label: p.op ? 'Deop' : 'Op', icon: icon('<polygon points="12 2 15 8.5 22 9.3 17 14 18.2 21 12 17.6 5.8 21 7 14 2 9.3 9 8.5 12 2"/>'),
+      disabled: off, onClick: () => togglePlayerOp(enc, p.op) },
+    { label: p.whitelisted ? 'Remove from whitelist' : 'Add to whitelist',
+      icon: icon('<path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>'),
+      disabled: off, onClick: () => togglePlayerWhitelist(enc, p.whitelisted) },
+    'sep',
+    { label: 'Kick', icon: icon('<path d="M16 17l5-5-5-5"/><path d="M21 12H9"/><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>'),
+      disabled: off, onClick: () => kickPlayer(enc) },
+    { label: 'Ban', icon: icon('<circle cx="12" cy="12" r="10"/><path d="M4.9 4.9l14.2 14.2"/>'),
+      danger: true, disabled: off, onClick: () => banPlayer(enc) },
+  ];
+  _consoleMenuOpen = true;
+  showContextMenu(pos, items, {
+    title: p.name,
+    titleImage: playerHeadUrl(p, 40),
+    onClose: () => {
+      _consoleMenuOpen = false;
+      const el = document.getElementById('console-output');
+      if (consoleAutoScroll && el) el.scrollTop = el.scrollHeight;
+    },
+  });
 }
 
 function handleConsoleKey(e) {
@@ -2935,6 +3488,7 @@ async function sendConsoleCommand() {
 async function applyQuickPort() {
   const port = parseInt(document.getElementById('quick-port').value);
   if (!port || !currentServerId) return;
+  const oldPort = config.servers.find(s => s.id === currentServerId)?.port;
   const r = await window.mcpanel.updateServer(currentServerId, { port });
   if (r.error) { toast(r.error, 'error'); return; }
   const idx = config.servers.findIndex(s => s.id === currentServerId);
@@ -2943,6 +3497,7 @@ async function applyQuickPort() {
   document.getElementById('detail-server-subtitle').textContent =
     `${config.servers[idx].version} · ${capitalise(config.servers[idx].software)} · Port ${port}`;
   toast('Port updated', 'success');
+  offerProxyPortSync(currentServerId, oldPort);
 }
 
 async function saveQuickSettings() {
@@ -3004,6 +3559,7 @@ async function saveServerSettings() {
   const updates = { name, ram, storageLimit, javaArgs, javaPath, group };
   if (port) updates.port = port;
 
+  const oldPort = config.servers.find(s => s.id === currentServerId)?.port;
   const r = await window.mcpanel.updateServer(currentServerId, updates);
   if (r.error) { toast(r.error, 'error'); return; }
 
@@ -3029,6 +3585,7 @@ async function saveServerSettings() {
   closeModal('modal-server-settings');
   renderServersGrid();
   toast('Settings saved', 'success');
+  offerProxyPortSync(currentServerId, oldPort);
 }
 
 async function browseJavaSettings() {
@@ -3048,6 +3605,39 @@ function onRamChange(prefix) {
   const isCustom = sel.value === 'custom';
   customEl.style.display = isCustom ? '' : 'none';
   if (isCustom) customEl.focus();
+  updateHeapPlaceholder(prefix);
+}
+
+// RAM is a server's TOTAL memory; the Java heap (-Xmx) is the part left after
+// the JVM's own needs. Mirrors ram_mb / auto_heap in mcpanel-cli's util.py.
+function ramToMb(value) {
+  const m = String(value || '').trim().match(/^(\d+)\s*(M|MB|G|GB)?$/i);
+  if (!m) return null;
+  return (m[2] || 'M').toUpperCase()[0] === 'G' ? Number(m[1]) * 1024 : Number(m[1]);
+}
+
+function autoHeapMb(ram) {
+  const total = ramToMb(ram);
+  if (total == null) return null;
+  const overhead = Math.min(Math.max(Math.floor(total / 5), 384), 1536);
+  return Math.max(total - overhead, 256);
+}
+
+function updateHeapPlaceholder(prefix) {
+  const el = document.getElementById(`${prefix}-heap`);
+  if (!el) return;
+  const mb = autoHeapMb(getRamValue(prefix));
+  el.placeholder = mb ? `Auto (≈${_compactSize(mb * 1048576)})` : 'Auto';
+}
+
+// An optional heap limit checked against the RAM limit: error text or null.
+function heapError(heap, ram) {
+  if (!heap) return null;
+  const h = ramToMb(heap);
+  if (!h) return 'Invalid heap limit - use e.g. 4G or 2048M';
+  const r = ramToMb(ram);
+  if (r && h > r) return "The heap limit can't be larger than the RAM limit - the heap is part of it";
+  return null;
 }
 
 function getRamValue(prefix) {
@@ -3172,8 +3762,9 @@ function openRenameModal() {
 async function confirmDeleteServer() {
   if (!currentServerId) return;
   const srv = config.servers.find(s => s.id === currentServerId);
-  // A linked server's files are its original folder, wherever it lives.
-  const where = srv?.linked ? `\n\nThis server is linked, so its original folder will be deleted:\n${srv.dir}` : '';
+  // A linked server's files live outside MCPanel's own folder - its original
+  // folder (imported in place) or the location it was created/cloned into.
+  const where = srv?.linked ? `\n\nThis server's folder is outside MCPanel's data folder and will be deleted:\n${srv.dir}` : '';
   const ok = await confirmDialog({
     title: 'Delete Server',
     message: `Permanently delete "${srv?.name || currentServerId}" and all its files?${where}\n\nThis action cannot be undone.`,
@@ -3213,7 +3804,11 @@ async function openCreateServerModal() {
   const unstable = document.getElementById('cs-unstable');
   if (unstable) unstable.checked = false;
   setRamDropdown('cs', '2G');
+  document.getElementById('cs-heap').value = '';
+  updateHeapPlaceholder('cs');
   populateJdkSelect('cs', 'cs-java', 'java');
+  document.getElementById('cs-dest').value = '';
+  updateServerDestHint('cs');
   await loadProfilesForCreate();
   openModal('modal-create-server');
   onSoftwareChange();
@@ -3394,6 +3989,9 @@ async function createServer() {
 
   if (!name) { toast('Please enter a server name', 'error'); return; }
   if (!ram) { toast('Please enter a custom RAM value (e.g. 3G, 2048M)', 'error'); return; }
+  const heap = document.getElementById('cs-heap').value.trim();
+  const heapErr = heapError(heap, ram);
+  if (heapErr) { toast(heapErr, 'error'); return; }
   if (!version || version === 'Loading...' || version === 'Failed to load') {
     toast('Please select a version', 'error'); return;
   }
@@ -3417,6 +4015,8 @@ async function createServer() {
     javaPath, javaArgs,
     profileId: profileId || null,
     unstableBuilds: document.getElementById('cs-unstable')?.checked || false,
+    dest: document.getElementById('cs-dest').value.trim() || null,
+    heap: heap || null,
   });
 
   closeModal('modal-download');
@@ -4043,8 +4643,13 @@ async function importProfile() {
   toast(`Profile "${name}" imported!`, 'success');
 }
 
+// Each entry: { path, name, scan }. With one folder the Name/Software/Version/Port
+// fields edit that server; with several, each row has its own name and the
+// detected software/version/port are used per server.
+let _importFolders = [];
+
 function openImportServerModal() {
-  document.getElementById('is-folder-path').value = '';
+  _importFolders = [];
   document.getElementById('is-name').value = '';
   document.getElementById('is-version').value = '';
   document.getElementById('is-port').value = '25565';
@@ -4054,32 +4659,73 @@ function openImportServerModal() {
   document.getElementById('is-java-args').value = '-XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200';
   const linkEl = document.getElementById('is-link');
   if (linkEl) linkEl.checked = false;
-  const hintEl = document.getElementById('is-scan-hint');
-  if (hintEl) hintEl.textContent = '';
+  renderImportFolders();
   openModal('modal-import-server');
 }
 
-async function browseImportServerFolder() {
-  const folderPath = await window.mcpanel.browseFolder();
-  if (!folderPath) return;
-  document.getElementById('is-folder-path').value = folderPath;
-  const scan = await window.mcpanel.scanServerFolder(folderPath);
+function _importScanLabel(scan) {
+  if (scan.isServer === false) return 'No server jar found';
+  if (!scan.software) return 'Not detected';
+  return `${capitalise(scan.software)}${scan.version ? ' ' + scan.version : ''}${scan.port ? ' · port ' + scan.port : ''}`;
+}
+
+// Fill the single-server fields from a folder's scan.
+function _applyImportScan(entry) {
+  const scan = entry.scan;
+  document.getElementById('is-name').value = entry.name;
   if (scan.port) document.getElementById('is-port').value = scan.port;
   if (scan.software) document.getElementById('is-software').value = scan.software;
   // Always overwrite: a version left over from a previously picked folder
   // (e.g. a Minecraft version on a Velocity proxy) would be wrong.
   document.getElementById('is-version').value = scan.version || '';
   if (scan.ram) setRamDropdown('is', scan.ram);
-  // Any server folder works - it doesn't need to have been made by MCPanel.
-  const hintEl = document.getElementById('is-scan-hint');
-  if (hintEl) {
-    hintEl.textContent = scan.isServer === false
-      ? 'This folder doesn\u2019t look like a Minecraft server (no server jar found).'
-      : (scan.software ? `Detected ${capitalise(scan.software)}${scan.version ? ' ' + scan.version : ''}.` : '');
+}
+
+function renderImportFolders() {
+  const multi = _importFolders.length > 1;
+  document.querySelectorAll('#modal-import-server .is-single-only')
+    .forEach(el => { el.style.display = multi ? 'none' : ''; });
+
+  const list = document.getElementById('is-folder-list');
+  list.innerHTML = _importFolders.length ? '' :
+    '<div style="font-size:12px;color:var(--text-muted)">No folder selected</div>';
+  _importFolders.forEach((f, i) => {
+    const row = document.createElement('div');
+    row.className = 'input-row';
+    row.innerHTML = `
+      <div style="flex:1;min-width:0">
+        <div style="font-family:var(--font-mono);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(f.path)}">${escHtml(f.path)}</div>
+        <div style="font-size:11px;color:${f.scan.isServer === false ? 'var(--yellow)' : 'var(--text-muted)'}">${escHtml(_importScanLabel(f.scan))}</div>
+      </div>
+      ${multi ? `<input type="text" class="input" style="width:180px" placeholder="Server name" value="${escHtml(f.name)}">` : ''}
+      <button class="btn-sm" title="Remove">✕</button>`;
+    const nameEl = row.querySelector('input');
+    if (nameEl) nameEl.oninput = () => { f.name = nameEl.value; };
+    row.querySelector('button').onclick = () => removeImportFolder(i);
+    list.appendChild(row);
+  });
+}
+
+function removeImportFolder(i) {
+  _importFolders.splice(i, 1);
+  if (_importFolders.length === 1) _applyImportScan(_importFolders[0]);
+  renderImportFolders();
+}
+
+async function browseImportServerFolder() {
+  const paths = await window.mcpanel.browseFolders();
+  if (!paths || !paths.length) return;
+  // Keep the single-server name edit when switching to the multi-folder list.
+  if (_importFolders.length === 1) {
+    _importFolders[0].name = document.getElementById('is-name').value.trim() || _importFolders[0].name;
   }
-  if (!document.getElementById('is-name').value) {
-    document.getElementById('is-name').value = folderPath.split(/[/\\]/).pop();
+  for (const folderPath of paths) {
+    if (_importFolders.some(f => f.path === folderPath)) continue;
+    const scan = await window.mcpanel.scanServerFolder(folderPath) || {};
+    _importFolders.push({ path: folderPath, name: folderPath.split(/[/\\]/).pop(), scan });
   }
+  if (_importFolders.length === 1) _applyImportScan(_importFolders[0]);
+  renderImportFolders();
 }
 
 async function browseJavaImport() {
@@ -4088,14 +4734,10 @@ async function browseJavaImport() {
 }
 
 async function importServer() {
-  const folderPath = document.getElementById('is-folder-path').value.trim();
-  const name = document.getElementById('is-name').value.trim();
-  if (!folderPath) { toast('Please select a server folder', 'error'); return; }
-  if (!name) { toast('Please enter a server name', 'error'); return; }
+  if (!_importFolders.length) { toast('Please select a server folder', 'error'); return; }
+  const multi = _importFolders.length > 1;
 
-  const software = document.getElementById('is-software').value;
-  const version = document.getElementById('is-version').value.trim() || 'Unknown';
-  const port = parseInt(document.getElementById('is-port').value) || 25565;
+  // Shared settings.
   const ram = getRamValue('is');
   if (!ram) { toast('Please enter a custom RAM value (e.g. 3G, 2048M)', 'error'); return; }
   const deviceErr = validateRamAndStorage(ram, null);
@@ -4104,24 +4746,58 @@ async function importServer() {
   const javaArgs = document.getElementById('is-java-args').value.trim();
   const link = !!document.getElementById('is-link')?.checked;
 
+  // Per-server settings: from the form for one folder, from each scan for several.
+  const jobs = _importFolders.map(f => multi ? {
+    folderPath: f.path,
+    name: f.name.trim(),
+    software: f.scan.software || 'paper',
+    version: f.scan.version || 'Unknown',
+    port: parseInt(f.scan.port) || 25565,
+  } : {
+    folderPath: f.path,
+    name: document.getElementById('is-name').value.trim(),
+    software: document.getElementById('is-software').value,
+    version: document.getElementById('is-version').value.trim() || 'Unknown',
+    port: parseInt(document.getElementById('is-port').value) || 25565,
+  });
+  if (jobs.some(j => !j.name)) { toast(multi ? 'Please enter a name for every server' : 'Please enter a server name', 'error'); return; }
+  const names = jobs.map(j => j.name.toLowerCase());
+  if (new Set(names).size !== names.length) { toast('Each server needs a different name', 'error'); return; }
+
   const btn = document.getElementById('is-submit');
   btn.disabled = true; btn.textContent = 'Importing...';
 
   closeModal('modal-import-server');
-  document.getElementById('modal-download-title').textContent = 'Importing Server';
   openModal('modal-download');
 
-  const r = await window.mcpanel.importServer({ folderPath, name, software, version, port, ram, javaPath, javaArgs, link });
+  const imported = [];
+  const failed = [];
+  for (let i = 0; i < jobs.length; i++) {
+    const job = jobs[i];
+    document.getElementById('modal-download-title').textContent =
+      multi ? `Importing Server ${i + 1}/${jobs.length}` : 'Importing Server';
+    const r = await window.mcpanel.importServer({ ...job, ram, javaPath, javaArgs, link });
+    if (r.error) { failed.push(`${job.name}: ${r.error}`); continue; }
+    config.servers.push(r.server);
+    imported.push(job.name);
+  }
 
   closeModal('modal-download');
   document.getElementById('modal-download-title').textContent = 'Creating Server';
   btn.disabled = false; btn.textContent = 'Import Server';
 
-  if (r.error) { toast('Error: ' + r.error, 'error'); return; }
-  config.servers.push(r.server);
-  renderServersGrid();
-  renderSidebarServers();
-  toast(link ? `Server "${name}" linked - MCPanel uses the original folder` : `Server "${name}" imported!`, 'success');
+  if (imported.length) {
+    renderServersGrid();
+    renderSidebarServers();
+  }
+  for (const msg of failed) toast('Error: ' + msg, 'error');
+  if (!imported.length) return;
+  if (multi) {
+    toast(`${imported.length} server${imported.length === 1 ? '' : 's'} ${link ? 'linked' : 'imported'}!`, 'success');
+  } else {
+    const name = imported[0];
+    toast(link ? `Server "${name}" linked - MCPanel uses the original folder` : `Server "${name}" imported!`, 'success');
+  }
 }
 
 function applyUpdateResult(result) {
@@ -4132,7 +4808,7 @@ function applyUpdateResult(result) {
       statusEl.innerHTML = `MCPanel-WebUI: <span style="color:var(--yellow)">v${result.latest} available - </span><a href="#" style="color:var(--purple-300)" onclick="window.mcpanel.openExternal('${result.url}');return false">View release</a>`;
     }
     if (pillEl) pillEl.classList.remove('hidden');
-    toast(`MCPanel-WebUI v${result.latest} is available on GitHub`, 'info');
+    if (!_appSettings.autoUpdate) toast(`MCPanel-WebUI v${result.latest} is available on GitHub`, 'info');
   } else if (result.latest) {
     if (statusEl) statusEl.textContent = `MCPanel-WebUI: up to date (v${result.current})`;
   } else {
@@ -4153,7 +4829,7 @@ function applyCliUpdateResult(result) {
     if (statusEl) {
       statusEl.innerHTML = `MCPanel-CLI: <span style="color:var(--yellow)">v${result.latest} available - </span><a href="#" style="color:var(--purple-300)" onclick="window.mcpanel.openExternal('${result.url}');return false">View on GitHub</a>`;
     }
-    toast(`MCPanel-CLI v${result.latest} is available on GitHub`, 'info');
+    if (!_appSettings.autoUpdate) toast(`MCPanel-CLI v${result.latest} is available on GitHub`, 'info');
   } else if (result.latest) {
     if (statusEl) statusEl.textContent = `MCPanel-CLI: up to date (v${result.current})`;
   } else {
@@ -4166,6 +4842,78 @@ async function checkForCliUpdates() {
   if (statusEl) statusEl.textContent = 'Checking…';
   const result = await window.mcpanel.checkCliUpdate();
   applyCliUpdateResult(result);
+}
+
+// Settings → "Update WebUI" / "Update CLI": fetches the newest release and
+// installs it on the host through `mcpanel api updateapp -p <product>`.
+async function updateAppNow(product) {
+  const btn = document.getElementById(`update-app-btn-${product}`);
+  const statusEl = document.getElementById(product === 'cli' ? 'cli-update-status-text' : 'update-status-text');
+  const name = product === 'cli' ? 'MCPanel-CLI' : 'MCPanel-WebUI';
+  const label = btn ? btn.innerHTML : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Updating…'; }
+  if (statusEl) statusEl.textContent = `${name}: downloading and installing the latest release…`;
+  try {
+    const r = await window.mcpanel.updateApp(product);
+    if (!r || r.error) {
+      const msg = (r && r.error) || 'Update failed';
+      if (statusEl) statusEl.textContent = `${name}: ${msg}`;
+      toast(msg, 'error');
+      return;
+    }
+    if (statusEl) statusEl.textContent = `${name}: ${r.message}`;
+    if (r.updated) {
+      promptRestart(r.message);
+      if (product === 'cli') setTimeout(checkForCliUpdates, 4000);
+    } else {
+      toast(r.message, 'info');
+    }
+  } catch (e) {
+    const msg = (e && e.message) || String(e);
+    if (statusEl) statusEl.textContent = `${name}: ${msg}`;
+    toast(msg, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = label; }
+  }
+}
+
+// ─── Restart prompt ───────────────────────────────────────────────────────────
+// After an update or an addon install / update / uninstall: a toast that stays
+// until dismissed, with a button that restarts MCPanel-WebUI. Only one is shown -
+// a newer reason replaces the text of the one already open.
+let _restartToast = null;
+
+function promptRestart(reason) {
+  const msg = /restart/i.test(reason) ? reason : `${reason} - restart MCPanel-WebUI to apply it`;
+  if (_restartToast && _restartToast.el.isConnected) {
+    _restartToast.el.querySelector('.toast-msg').textContent = msg;
+    return;
+  }
+  _restartToast = toast(msg, 'info', {
+    duration: Infinity,
+    buttons: [
+      { label: 'Later', onClick: () => {} },
+      {
+        label: 'Restart MCPanel-WebUI',
+        onClick: async (btn) => {
+          btn.disabled = true;
+          btn.label.textContent = 'Restarting…';
+          try { await window.mcpanel.restartApp(); }
+          catch (e) { toast(`Could not restart MCPanel-WebUI: ${(e && e.message) || e}`, 'error'); }
+        },
+      },
+    ],
+  });
+}
+
+// With auto-update on, the server installs WebUI / CLI updates itself
+// (server/commands/core.js) and broadcasts `restart-required`. Fetching the
+// pending state is admin-only, so other users never get a restart button.
+async function showPendingRestart() {
+  try {
+    const p = await window.mcpanel.getRestartPending();
+    if (p && p.reason) promptRestart(p.reason);
+  } catch { /* not an admin */ }
 }
 
 let spigotDisabled = false;
@@ -4266,32 +5014,99 @@ async function detectJdk() {
   });
 }
 
+// ─── Server location (create / clone) ────────────────────────────────────────
+// The chosen folder is a PARENT: the CLI gives the server its own subfolder in
+// it, named after the server (mirrors _folder_name in mcpanel-cli's servers.py;
+// a "-2" suffix is added there if that name is taken).
+function serverFolderName(name) {
+  return (name || '').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').trim().replace(/^\.+|\.+$/g, '').slice(0, 100);
+}
+
+function updateServerDestHint(prefix) {
+  const hint = document.getElementById(`${prefix}-dest-hint`);
+  if (!hint) return;
+  const dest = document.getElementById(`${prefix}-dest`).value.trim();
+  if (!dest) { hint.textContent = ''; return; }
+  const sep = dest.includes('\\') && !dest.includes('/') ? '\\' : '/';
+  const folder = serverFolderName(document.getElementById(`${prefix}-name`).value) || '<server id>';
+  hint.textContent = `Server folder: ${dest.replace(/[\\/]+$/, '')}${sep}${folder}`;
+}
+
+async function browseServerDest(prefix) {
+  const folder = await window.mcpanel.browseFolder();
+  if (!folder) return;
+  document.getElementById(`${prefix}-dest`).value = folder;
+  updateServerDestHint(prefix);
+}
+
+// ─── Clone (Duplicate) Server ─────────────────────────────────────────────────
 function openDuplicateServerModal() {
   if (!currentServerId) return;
   const srv = config.servers.find(s => s.id === currentServerId);
   if (!srv) return;
   document.getElementById('dup-name').value = `Copy of ${srv.name}`;
+  document.getElementById('dup-dest').value = '';
+  const keep = document.createElement('option');
+  keep.value = '';
+  keep.textContent = `Keep current (${srv.version || 'unknown'})`;
+  document.getElementById('dup-version').replaceChildren(keep);
+  document.getElementById('dup-version-warning').classList.add('hidden');
+  updateServerDestHint('dup');
   closeModal('modal-server-settings');
   openModal('modal-duplicate-server');
+  loadCloneVersions(srv);
+}
+
+// Fills the version picker after the modal is already open; if the list can't
+// be fetched the clone still works with "Keep current".
+async function loadCloneVersions(srv) {
+  const cacheKey = `${srv.software}_false_false`;
+  let versions = versionCache[cacheKey];
+  if (!versions) {
+    const r = await window.mcpanel.fetchVersions(srv.software, false, false);
+    if (r.error || !Array.isArray(r.versions)) return;
+    versions = versionCache[cacheKey] = r.versions;
+  }
+  if (currentServerId !== srv.id) return;
+  const sel = document.getElementById('dup-version');
+  for (const v of versions) {
+    if (v === srv.version) continue;
+    const opt = document.createElement('option');
+    opt.value = v; opt.textContent = v;
+    sel.appendChild(opt);
+  }
+}
+
+function onCloneVersionChange() {
+  const srv = config.servers.find(s => s.id === currentServerId);
+  const version = document.getElementById('dup-version').value;
+  const warn = document.getElementById('dup-version-warning');
+  warn.classList.toggle('hidden', !version);
+  if (!version || !srv) return;
+  const spigot = srv.software === 'spigot' ? ' Spigot is rebuilt with BuildTools, which takes a few minutes.' : '';
+  warn.textContent = `The copy gets a fresh ${capitalise(srv.software || '')} ${version} jar; worlds, plugins and configs are copied as-is. ` +
+    `Plugins/mods may need updating, and opening a world on an older version than it was saved with can corrupt it.${spigot}`;
 }
 
 async function executeDuplicateServer() {
   const newName = document.getElementById('dup-name').value.trim();
   if (!newName) { toast('Please enter a name', 'error'); return; }
+  const version = document.getElementById('dup-version').value || null;
+  const dest = document.getElementById('dup-dest').value.trim() || null;
   const btn = document.getElementById('dup-submit');
-  btn.disabled = true; btn.textContent = 'Duplicating…';
+  btn.disabled = true; btn.textContent = 'Cloning…';
   closeModal('modal-duplicate-server');
-  document.getElementById('modal-download-title').textContent = 'Duplicating Server';
+  document.getElementById('modal-download-title').textContent = 'Cloning Server';
   openModal('modal-download');
-  const r = await window.mcpanel.duplicateServer(currentServerId, newName);
+  const r = await window.mcpanel.duplicateServer(currentServerId, newName, { version, dest });
   closeModal('modal-download');
   document.getElementById('modal-download-title').textContent = 'Creating Server';
-  btn.disabled = false; btn.textContent = 'Duplicate';
+  btn.disabled = false; btn.textContent = 'Clone';
   if (r.error) { toast('Error: ' + r.error, 'error'); return; }
   config.servers.push(r.server);
   renderServersGrid();
   renderSidebarServers();
-  toast(`Server "${newName}" duplicated!`, 'success');
+  toast(`Server "${newName}" cloned!`, 'success');
 }
 
 const FTREE_SELECTED_DEFAULTS = new Set(['mods', 'plugins']);
@@ -4454,6 +5269,7 @@ document.querySelectorAll('.modal-overlay').forEach(overlay => {
       if (id === 'modal-confirm') { resolveConfirmDialog(false); return; }
       if (id === 'modal-external-link') { resolveExternalLink(false); return; }
       if (id === 'modal-mclogs') { resolveMclogsNotice(false); return; }
+      if (id === 'modal-plugin-disclaimer') { resolvePluginDisclaimer(false); return; }
       if (id !== 'modal-download' && id !== 'modal-cli-missing' && id !== 'modal-buildtools-missing') closeModal(id);
     }
   });
@@ -4521,12 +5337,16 @@ window.addEventListener('keydown', e => {
 // true only when the user hits the confirm button.
 let _confirmResolve = null;
 
-function confirmDialog({ title = 'Confirm', message = '', confirmLabel = 'Delete' } = {}) {
+function confirmDialog({ title = 'Confirm', message = '', confirmLabel = 'Delete',
+                         cancelLabel = 'Cancel', danger = true } = {}) {
   // A second dialog while one is open would orphan the first promise.
   if (_confirmResolve) resolveConfirmDialog(false);
   document.getElementById('confirm-title').textContent = title;
   document.getElementById('confirm-message').textContent = message;
-  document.getElementById('confirm-ok').textContent = confirmLabel;
+  const okBtn = document.getElementById('confirm-ok');
+  okBtn.textContent = confirmLabel;
+  okBtn.className = danger ? 'btn-danger' : 'btn-primary';
+  document.getElementById('confirm-cancel').textContent = cancelLabel;
   openModal('modal-confirm');
   return new Promise(resolve => { _confirmResolve = resolve; });
 }
@@ -4549,8 +5369,10 @@ document.addEventListener('keydown', e => {
 //   trusted SVG markup shown after the label. A click runs onClick(btn) and
 //   closes the toast, unless onClick returns false (e.g. to relabel the button
 //   to "Copied" and stay open - set btn.label.textContent for that).
-//   duration: ms before it fades out; toasts with buttons default to 10s and
-//   don't fade while hovered, so there's time to reach a button.
+//   duration: ms before it fades out (Infinity: stays until a button closes
+//   it); toasts with buttons default to 10s and don't fade while hovered, so
+//   there's time to reach a button.
+// Returns { el, close }.
 function toast(msg, type = 'info', opts = {}) {
   const container = document.getElementById('toast-container');
   const el = document.createElement('div');
@@ -4566,7 +5388,10 @@ function toast(msg, type = 'info', opts = {}) {
     el.style.opacity = '0'; el.style.transform = 'translateX(20px)';
     setTimeout(() => el.remove(), 300);
   };
-  const arm = () => { clearTimeout(timer); timer = setTimeout(close, duration); };
+  const arm = () => {
+    clearTimeout(timer);
+    if (Number.isFinite(duration)) timer = setTimeout(close, duration);
+  };
 
   if (buttons.length) {
     const text = document.createElement('div');
@@ -4590,16 +5415,165 @@ function toast(msg, type = 'info', opts = {}) {
       row.appendChild(btn);
     });
     el.append(text, row);
-    el.addEventListener('mouseenter', () => clearTimeout(timer));
-    el.addEventListener('mouseleave', () => { if (!closed) arm(); });
   } else {
     el.textContent = msg;
   }
+  // Hovering pauses the hide timer so the message can be read or selected/copied
+  el.addEventListener('mouseenter', () => clearTimeout(timer));
+  el.addEventListener('mouseleave', () => { if (!closed) arm(); });
   container.appendChild(el);
   arm();
+  return { el, close };
 }
 
 function capitalise(s) { return s ? s[0].toUpperCase() + s.slice(1) : s; }
+
+// ─── Context menu ─────────────────────────────────────────────────────────────
+// showContextMenu(event, items, { title }) replaces the browser's right-click
+// menu. items: [{ label, icon, onClick, danger, disabled }] - a falsy entry is skipped
+// and the string 'sep' draws a divider. `icon` is trusted SVG markup; `title`
+// is plain text shown as the menu's heading, with `titleImage` (a URL) beside it.
+let _ctxMenuEl = null;
+let _ctxMenuOnClose = null;
+
+function closeContextMenu() {
+  if (!_ctxMenuEl || _ctxMenuEl.classList.contains('hidden')) return;
+  _ctxMenuEl.classList.add('hidden');
+  const cb = _ctxMenuOnClose;
+  _ctxMenuOnClose = null;
+  if (cb) cb();
+}
+
+function showContextMenu(e, items, { title, titleImage, onClose } = {}) {
+  e.preventDefault();
+  e.stopPropagation();
+  closeContextMenu();
+  if (!_ctxMenuEl) {
+    _ctxMenuEl = document.createElement('div');
+    _ctxMenuEl.className = 'ctx-menu hidden';
+    _ctxMenuEl.setAttribute('role', 'menu');
+    document.body.appendChild(_ctxMenuEl);
+    document.addEventListener('mousedown', ev => { if (!_ctxMenuEl.contains(ev.target)) closeContextMenu(); }, true);
+    document.addEventListener('keydown', ev => { if (ev.key === 'Escape') closeContextMenu(); });
+    window.addEventListener('blur', closeContextMenu);
+    window.addEventListener('resize', closeContextMenu);
+    document.addEventListener('scroll', closeContextMenu, true);
+  }
+  _ctxMenuEl.innerHTML = '';
+  if (title) {
+    const head = Object.assign(document.createElement('div'),
+      { className: 'ctx-menu-title', textContent: title, title });
+    if (titleImage) {
+      const img = Object.assign(document.createElement('img'), { className: 'ctx-menu-title-img', src: titleImage, alt: '' });
+      img.onerror = () => img.remove();
+      head.prepend(img);
+      head.classList.add('has-img');
+    }
+    _ctxMenuEl.appendChild(head);
+  }
+  for (const item of items) {
+    if (!item) continue;
+    if (item === 'sep') {
+      _ctxMenuEl.appendChild(Object.assign(document.createElement('div'), { className: 'ctx-menu-sep' }));
+      continue;
+    }
+    const btn = document.createElement('button');
+    btn.className = `ctx-menu-item${item.danger ? ' danger' : ''}`;
+    btn.setAttribute('role', 'menuitem');
+    btn.disabled = !!item.disabled;
+    btn.innerHTML = `<span class="ctx-menu-icon">${item.icon || ''}</span><span>${escapeHtml(item.label)}</span>`;
+    btn.onclick = () => { closeContextMenu(); item.onClick(); };
+    _ctxMenuEl.appendChild(btn);
+  }
+  _ctxMenuOnClose = onClose || null;
+  _ctxMenuEl.classList.remove('hidden');
+  // Keep it on screen: open up/left of the cursor near the right/bottom edge.
+  const { offsetWidth: w, offsetHeight: h } = _ctxMenuEl;
+  const x = e.clientX + w > window.innerWidth - 4 ? Math.max(4, e.clientX - w) : e.clientX;
+  const y = e.clientY + h > window.innerHeight - 4 ? Math.max(4, e.clientY - h) : e.clientY;
+  _ctxMenuEl.style.left = `${x}px`;
+  _ctxMenuEl.style.top = `${y}px`;
+  _ctxMenuEl.querySelector('.ctx-menu-item:not(:disabled)')?.focus({ preventScroll: true });
+}
+
+// navigator.clipboard only exists in a secure context - the WebUI opened over
+// plain http from another device isn't one - so fall back to execCommand.
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const ta = Object.assign(document.createElement('textarea'), { value: text });
+    ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch { /* fall through */ }
+    ta.remove();
+    return ok;
+  }
+}
+
+const CTX_ICON = {
+  rename: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>',
+  move: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><path d="M12 11v6M9 14l3 3 3-3"/></svg>',
+  newFile: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="15" x2="12" y2="9"/><line x1="9" y1="12" x2="15" y2="12"/></svg>',
+  newFolder: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>',
+  copy: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+  download: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>',
+  delete: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>',
+};
+
+// Right-click menu for a row in a server's file browser. Right-clicking a row
+// that is part of a multi-selection acts on the whole selection.
+function openFileContextMenu(e, row, nodePath, node) {
+  const srv = config.servers.find(s => s.id === currentServerId);
+  // Copied paths start at the server's folder name, e.g. "Survival/plugins/x.yml".
+  const folder = (srv?.dir || currentServerId).replace(/[\\/]+$/, '').split(/[\\/]/).pop();
+  const multi = selectedFilePaths.size > 1 && selectedFilePaths.has(nodePath);
+  const targets = multi ? [...selectedFilePaths] : [nodePath];
+  const isDir = node.type === 'dir';
+
+  const copyPaths = async () => {
+    const ok = await copyText(targets.map(p => `${folder}/${p}`).join('\n'));
+    toast(ok ? (multi ? `${targets.length} paths copied` : 'Path copied') : 'Could not copy the path', ok ? 'success' : 'error');
+  };
+  // Only the WebUI can hand a file to the browser; the desktop app has the
+  // toolbar's export instead.
+  const canDownload = !!window.mcpanel.downloadServerPath;
+  const download = () => targets.forEach(p => window.mcpanel.downloadServerPath(currentServerId, p));
+
+  if (multi) row.parentElement.querySelectorAll('.file-row.selected').forEach(r => r.classList.add('ctx-active'));
+  else row.classList.add('ctx-active');
+  showContextMenu(e, [
+    { label: 'Rename', icon: CTX_ICON.rename, disabled: multi, onClick: () => renameFileEntry(nodePath, node.name) },
+    { label: multi ? `Move ${targets.length} items…` : 'Move…', icon: CTX_ICON.move,
+      onClick: () => openFileMoveModal('server', multi ? null : [nodePath]) },
+    { label: multi ? 'Copy paths' : 'Copy path', icon: CTX_ICON.copy, onClick: copyPaths },
+    canDownload && {
+      label: multi ? `Download ${targets.length} items` : (isDir ? 'Download as .zip' : 'Download'),
+      icon: CTX_ICON.download, onClick: download,
+    },
+    'sep',
+    multi
+      ? { label: `Delete ${targets.length} items`, icon: CTX_ICON.delete, danger: true, onClick: () => deleteSelectedFiles() }
+      : { label: 'Delete', icon: CTX_ICON.delete, danger: true, onClick: () => deleteFileEntry(nodePath, node.name, isDir) },
+  ], {
+    title: multi ? `${targets.length} Selected` : node.name,
+    onClose: () => document.querySelectorAll('.file-row.ctx-active').forEach(r => r.classList.remove('ctx-active')),
+  });
+}
+
+// The "Feels empty in here" + button: New File / New Folder in a menu that
+// opens below the button itself (the toolbar's menu is pinned to the toolbar).
+function openEmptyFolderNewMenu(btn) {
+  const r = btn.getBoundingClientRect();
+  const at = { clientX: r.left, clientY: r.bottom + 4, preventDefault() {}, stopPropagation() {} };
+  showContextMenu(at, [
+    { label: 'New File', icon: CTX_ICON.newFile, onClick: () => fileNewMenuPick('server', 'file') },
+    { label: 'New Folder', icon: CTX_ICON.newFolder, onClick: () => fileNewMenuPick('server', 'folder') },
+  ]);
+}
 
 function escapeHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -4753,18 +5727,35 @@ async function installThemeFromUrl() {
   toast(`Theme "${r.theme.name}" installed!`, 'success');
 }
 
+// Theme browser: themes from every catalogue, shown one library at a time.
+let _themeBrowserThemes = null;
+let _themeBrowserSource = 'mcpanel';
+
 async function openThemeBrowser() {
   openModal('modal-theme-browser');
+  document.getElementById('theme-browser-source').value = _themeBrowserSource;
   const content = document.getElementById('theme-browser-content');
-  content.innerHTML = `<div style="text-align:center;padding:40px 0;color:var(--text-muted)">Fetching themes from GitHub…</div>`;
+  content.innerHTML = `<div style="text-align:center;padding:40px 0;color:var(--text-muted)">Fetching themes…</div>`;
 
   const r = await window.mcpanel.fetchGithubThemes();
+  _themeBrowserThemes = r.themes || [];
+  renderThemeBrowser();
+}
 
-  if (!r.themes || r.themes.length === 0) {
+function switchThemeSource(source) {
+  _themeBrowserSource = source;
+  if (_themeBrowserThemes) renderThemeBrowser();
+}
+
+function renderThemeBrowser() {
+  const content = document.getElementById('theme-browser-content');
+  const themes = _themeBrowserThemes.filter(t => (t.source || 'mcpanel') === _themeBrowserSource);
+
+  if (themes.length === 0) {
     content.innerHTML = `
       <div class="theme-browser-empty">
         <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-        <p>No online themes available yet.</p>
+        <p>No online themes available from this library.</p>
         <p style="margin-top:6px;font-size:11px">Import a local ZIP or install from a direct URL instead.</p>
       </div>`;
     return;
@@ -4773,7 +5764,7 @@ async function openThemeBrowser() {
   const grid = document.createElement('div');
   grid.className = 'theme-browser-grid';
 
-  r.themes.forEach(theme => {
+  themes.forEach(theme => {
     const card = document.createElement('div');
     card.className = 'theme-browser-card';
 
@@ -4786,7 +5777,7 @@ async function openThemeBrowser() {
       <div class="theme-browser-card-by">by ${creatorHtml}</div>
       <div class="theme-browser-card-desc">${escapeHtml(theme.description || '')}</div>
       <div class="theme-browser-card-footer">
-        <span class="theme-version-tag">v${escapeHtml(theme.version || '?')} · MCPanel ${escapeHtml(theme.appVersion || '?')}</span>
+        <span class="theme-version-tag">v${escapeHtml(theme.version || '?')}${theme.appVersion ? ` · MCPanel ${escapeHtml(theme.appVersion)}` : ''}</span>
         <button class="btn-sm" onclick="installOnlineTheme('${escapeHtml(theme.downloadUrl)}', this)">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           Install
@@ -5059,14 +6050,29 @@ async function copyVelocitySecret() {
   }
 }
 
+// Fades out the startup loading screen. Safe to call more than once.
+function hideAppLoader() {
+  const el = document.getElementById('app-loader');
+  if (!el || el.classList.contains('done')) return;
+  try {
+    const css = getComputedStyle(document.documentElement);
+    const v = n => css.getPropertyValue(n).trim();
+    localStorage.setItem('mcpanel-loader-colors', JSON.stringify({ bg: v('--bg-base'), fg: v('--text-secondary'), accent: v('--accent') }));
+  } catch (_) {}
+  el.classList.add('done');
+  setTimeout(() => el.remove(), 150);
+}
+// Never leave the loader up forever if something hangs.
+setTimeout(hideAppLoader, 20000);
+
 window._cliReady.then(ok => {
   if (ok) {
-    init();
+    init().catch(e => console.error('init failed:', e)).finally(hideAppLoader);
   } else {
     // CLI missing: skip full init, but still apply the default theme so the
     // app isn't unstyled behind the "CLI not found" modal. Theme handling is
     // entirely Rust-native and doesn't touch the CLI.
-    applyDefaultThemeNoCli();
+    applyDefaultThemeNoCli().finally(hideAppLoader);
   }
 });
 
