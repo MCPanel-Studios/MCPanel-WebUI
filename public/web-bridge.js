@@ -615,10 +615,12 @@
       const args = [
         '-t',    data.name,
         '-sw',   data.software,
-        '-v',    data.version,
         '-p',    String(data.port),
         '-ram',  data.ram,
       ];
+      // Custom servers have no version to download, just a run file to copy.
+      if (data.version) args.push('-v', data.version);
+      if (data.runFile) args.push('-run', data.runFile);
       if (data.javaPath && data.javaPath !== 'java') {
         args.push('-java', data.javaPath);
       }
@@ -737,6 +739,21 @@
       extensions: ['*'],
     }),
 
+    // Run file of a "custom" (start script / executable) or "custom-java"
+    // (.jar) server. `exts` (no dots) are the server machine's types, from
+    // `mcpanel system`'s runFileTypes; the CLI re-checks them.
+    browseRunFile: (software, exts) => _pickPath({
+      mode: 'file',
+      title: software === 'custom-java' ? 'Select Server Jar' : 'Select Run File',
+      extensions: exts && exts.length ? exts : ['*'],
+    }),
+
+    // Through the CLI so a custom-java server's "Java N" version is re-read.
+    setServerJava: (id, javaPath) => _cliSafe(['update', 'server', '-id', id, '-java', javaPath || 'java']),
+
+    // "" switches back to auto-detection.
+    setRunFile: (id, runFile) => _cliSafe(['update', 'server', '-id', id, '-run', runFile || '']),
+
     // Databases page: `mcpanel api db <args>` (list/tables/rows/update/insert/delete/mysql).
     db: (args) => _cliSafe(['db', ...args]),
 
@@ -771,6 +788,7 @@
       if (data.version) args.push('-v', data.version);
       if (data.javaPath) args.push('-java', data.javaPath);
       if (data.javaArgs) args.push('-jargs', data.javaArgs);
+      if (data.runFile) args.push('-run', data.runFile);
       // Use the folder in place instead of copying it into MCPanel's dir.
       if (data.link) args.push('--link');
       const raw = await _invoke('import_server_cmd', { args });

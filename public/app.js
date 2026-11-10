@@ -346,8 +346,11 @@ function openServerDetail(id) {
 
   document.getElementById('detail-server-name').textContent = srv.name;
   document.getElementById('detail-server-subtitle').textContent =
-    `${srv.version} · ${capitalise(srv.software)} · Port ${srv.port}`;
+    `${serverTypeLabel(srv)} · Port ${srv.port}`;
   document.getElementById('dtab-plugins-label').textContent = _pluginTabLabel(srv.software);
+  // Custom servers run whatever the user brought: no plugin manager.
+  document.getElementById('dtab-plugins').classList.toggle('hidden', !_pluginsSupported(srv.software));
+  _toggleJavaFields('quick', srv.software);
   document.getElementById('detail-port').textContent = srv.port;
   setRamBar(0, srv.ram, srv.heap);
   setCpuGauge(null, false);
@@ -573,7 +576,7 @@ function createServerCard(srv) {
     <div class="server-card-header">
       <div>
         <div class="server-card-name">${escapeHtml(srv.name)}</div>
-        <div class="server-card-sub">${srv.version} · ${capitalise(srv.software)}</div>
+        <div class="server-card-sub">${escapeHtml(serverTypeLabel(srv))}</div>
       </div>
       <div class="status-badge offline" id="badge-${srv.id}">OFFLINE</div>
     </div>
@@ -997,7 +1000,7 @@ function switchDetailTab(name) {
   });
   window.MCPanelAddons?._serverTabShown(name);
   if (name === 'logs') openLogsTab();
-  if (name === 'files') openFilesTab();
+  if (name === 'files') openFilesTab({ refresh: true });
   if (name === 'settings') openSettingsTab();
   if (name === 'plugins') openServerPluginsTab();
   if (name === 'backups') openBackupsTab();
@@ -1223,10 +1226,18 @@ function fileNewMenuPick(scope, kind) {
   }
 }
 
-async function openFilesTab() {
+// refresh: re-read the folder even when a tree is cached. The previous
+// listing stays on screen meanwhile, so the tab doesn't flash "Loading…".
+async function openFilesTab({ refresh = false } = {}) {
   if (!currentServerId) return;
   const listEl = document.getElementById('file-list');
   const savedPaths = [...fileNavPaths];
+  if (refresh && cachedFileTree) {
+    const id = currentServerId;
+    const r = await window.mcpanel.getServerFileTree(id);
+    if (id !== currentServerId) return;      // switched servers meanwhile
+    if (!r.error) cachedFileTree = r.tree || [];
+  }
   if (!cachedFileTree) {
     listEl.innerHTML = `<div style="padding:24px;text-align:center;color:var(--text-muted);font-size:12px">Loading…</div>`;
     const r = await window.mcpanel.getServerFileTree(currentServerId);
@@ -1544,6 +1555,23 @@ let _editorRelPath = null;
 let _editorCtx = null; // { type: 'server'|'profile', id: string }
 
 let _aceEditor = null;
+let _fileEditorMaximized = false;
+try { _fileEditorMaximized = localStorage.getItem('fileEditorMaximized') === '1'; } catch {}
+
+function _applyFileEditorMaximize() {
+  const modal = document.querySelector('#modal-file-editor .file-editor-modal');
+  const btn = document.getElementById('file-editor-maximize');
+  if (!modal) return;
+  modal.classList.toggle('maximized', _fileEditorMaximized);
+  if (btn) btn.title = _fileEditorMaximized ? 'Restore editor size' : 'Enlarge editor';
+  if (_aceEditor) requestAnimationFrame(() => _aceEditor && _aceEditor.resize());
+}
+
+function toggleFileEditorMaximize() {
+  _fileEditorMaximized = !_fileEditorMaximized;
+  try { localStorage.setItem('fileEditorMaximized', _fileEditorMaximized ? '1' : '0'); } catch {}
+  _applyFileEditorMaximize();
+}
 
 function _initAceEditor() {
   if (_aceEditor) return;
@@ -1555,9 +1583,27 @@ function _initAceEditor() {
     useWorker: false,
     wrap: false,
     scrollPastEnd: 0.3,
+    fontFamily: getComputedStyle(document.documentElement).getPropertyValue('--font-mono').trim() || 'monospace',
+    fontSize: 12,
   });
   _aceEditor.renderer.setScrollMargin(4, 4, 0, 0);
   _aceEditor.on('change', _runEditorValidation);
+  if (document.fonts) document.fonts.addEventListener('loadingdone', _aceRemeasure);
+}
+
+// Ace caches the char width; if it measured the fallback font before the webfont swapped in, cursor and selection drift.
+function _aceRemeasure() {
+  if (!_aceEditor) return;
+  const apply = () => {
+    if (!_aceEditor) return;
+    _aceEditor.renderer.updateFontSize();
+    _aceEditor.resize(true);
+  };
+  if (document.fonts && document.fonts.load) {
+    document.fonts.load('12px "JetBrains Mono"').then(apply, apply);
+  } else {
+    apply();
+  }
 }
 
 function _aceTheme() {
@@ -1620,6 +1666,7 @@ async function openFileEditor(relPath, name, ctx) {
   document.getElementById('file-editor-title').textContent = name;
   const saveBtn = document.getElementById('file-editor-save');
   saveBtn.disabled = true; saveBtn.textContent = 'Loading…';
+  _applyFileEditorMaximize();
   openModal('modal-file-editor');
   _initAceEditor();
   _aceEditor.setTheme(_aceTheme());
@@ -1631,7 +1678,7 @@ async function openFileEditor(relPath, name, ctx) {
     _aceEditor.setValue(content, -1);
     _runEditorValidation();
     saveBtn.disabled = false; saveBtn.textContent = 'Save';
-    setTimeout(() => _aceEditor && _aceEditor.resize(), 50);
+    setTimeout(_aceRemeasure, 50);
   } catch (e) {
     closeModal('modal-file-editor');
     toast(String(e), 'error');
@@ -1913,6 +1960,8 @@ function openSettingsTab() {
   document.getElementById('tsett-group').value = srv.group || '';
   document.getElementById('tsett-java-args').value = srv.javaArgs || '';
   populateJdkSelect('tsett', 'tsett-java-path', srv.javaPath || 'java');
+  _showRunFileGroup('tsett', srv.software);
+  document.getElementById('tsett-run').value = srv.runFile || '';
   const proxyBtnRow = document.getElementById('tsett-proxy-btn-row');
   if (proxyBtnRow) proxyBtnRow.classList.toggle('hidden', !PAPER_SOFTWARES.has(srv.software));
   renderProxyLink(srv);
@@ -1944,7 +1993,10 @@ async function saveTabSettings() {
   if (deviceErr) { toast(deviceErr, 'error'); return; }
 
   const updates = { name, ram, heap, storageLimit, port, group, javaArgs, javaPath };
+  if (!(await _saveRunFile('tsett'))) return;
   const oldPort = config.servers.find(s => s.id === currentServerId)?.port;
+  const newVersion = await _refreshJavaVersion(currentServerId, javaPath);
+  if (newVersion) updates.version = newVersion;
   const r = await window.mcpanel.updateServer(currentServerId, updates);
   if (r && r.error) { toast(r.error, 'error'); return; }
 
@@ -1953,7 +2005,7 @@ async function saveTabSettings() {
   const srv = config.servers[idx];
 
   document.getElementById('detail-server-name').textContent = name;
-  document.getElementById('detail-server-subtitle').textContent = `${srv.version} · ${capitalise(srv.software)} · Port ${srv.port}`;
+  document.getElementById('detail-server-subtitle').textContent = `${serverTypeLabel(srv)} · Port ${srv.port}`;
   if (port) document.getElementById('detail-port').textContent = port;
   const nameEl = document.querySelector(`#card-${currentServerId} .server-card-name`);
   if (nameEl) nameEl.textContent = name;
@@ -2001,6 +2053,19 @@ function _installedPlugin(ctx, pkey) {
   return _pluginInstalledMap[_pluginCtxKey(ctx)]?.[pkey] || null;
 }
 
+// "1.21.4 · Paper", "Java 25 · Custom" (custom-java: the version is the Java
+// it runs on), or just "Custom" for a start-script server.
+function serverTypeLabel(srv) {
+  // custom-java whose Java couldn't be read has the version "Custom" itself.
+  if (srv.software === 'custom' || (srv.software === 'custom-java' && !/^Java /.test(srv.version || ''))) return 'Custom';
+  if (srv.software === 'pumpkin') return `${String(srv.version || 'Unknown').split('+')[0]} · Pumpkin`;
+  return `${srv.version} · ${capitalise(srv.software)}`;
+}
+
+function _pluginsSupported(software) {
+  return !['custom', 'custom-java', 'pumpkin'].includes(software);
+}
+
 function _pluginTabLabel(software) {
   return MODDED_SOFTWARES.has(software) ? 'Mods' : 'Plugins';
 }
@@ -2019,15 +2084,19 @@ async function _loadInstalledPlugins(ctx) {
       _pluginInstalledMap[k] = map;
     }
   } catch { /* keep whatever was known - the buttons just fall back to Install */ }
+  // Never leave the Installed tab on "Loading…" when the list couldn't be read.
+  if (!_pluginInstalledMap[k]) _pluginInstalledMap[k] = {};
   if (k === _pluginCtxKey(ctx)) _refreshPluginRows(ctx);
 }
 
 function openServerPluginsTab() {
   const srv = config.servers.find(s => s.id === currentServerId);
   if (!srv) return;
+  if (!_pluginsSupported(srv.software)) { switchDetailTab('console'); return; }
   const label = _pluginTabLabel(srv.software);
   document.getElementById('dtab-plugins-label').textContent = label;
   _setupPluginProviders(srv.software, 'server');
+  searchPlugins('server');
   _loadInstalledPlugins('server');
 }
 
@@ -2038,6 +2107,7 @@ function openProfilePluginsTab() {
   const label = _pluginTabLabel(software);
   document.getElementById('ptab-plugins-label').textContent = label;
   _setupPluginProviders(software, 'profile');
+  searchPlugins('profile');
   _loadInstalledPlugins('profile');
 }
 
@@ -2046,8 +2116,9 @@ function _setupPluginProviders(software, ctx) {
   const hangarBtn = document.getElementById(`${ctx === 'server' ? 's' : 'p'}provider-hangar`);
   const spigotBtn = document.getElementById(`${ctx === 'server' ? 's' : 'p'}provider-spigotmc`);
   if (hangarBtn) hangarBtn.classList.toggle('hidden', isMod);
-  if (spigotBtn) spigotBtn.classList.toggle('hidden', isMod);
-  const defaultProvider = isMod ? 'modrinth' : 'hangar';
+  // SpigotMC only hosts Bukkit/Spigot plugins - nothing for mods or Velocity.
+  if (spigotBtn) spigotBtn.classList.toggle('hidden', isMod || software === 'velocity');
+  const defaultProvider = 'installed';
   delete _pluginPageState[ctx]; // a stale "installed" view must not re-render into a new server's tab
   if (ctx === 'server') _serverPluginProvider = defaultProvider;
   else _profilePluginProvider = defaultProvider;
@@ -2144,11 +2215,17 @@ async function searchPlugins(ctx, append = false) {
 
 function _loadMorePlugins(ctx) { searchPlugins(ctx, true); }
 
-// The "Installed" tab lists the .list records instead of searching a platform.
+// The "Installed" tab lists every jar in plugins/ (or mods/) instead of
+// searching a platform: MCPanel's .list records, plus jars added some other
+// way (platform "local" - those can only be uninstalled).
 function _renderInstalledPlugins(ctx) {
   const listEl = document.getElementById(`${ctx}-plugin-list`);
   const state = _pluginPageState[ctx];
   if (!listEl || !state) return;
+  if (!_pluginInstalledMap[_pluginCtxKey(ctx)]) {
+    listEl.innerHTML = '<div class="plugin-state-msg">Loading…</div>';
+    return;
+  }
   const q = (state.query || '').toLowerCase();
   const recs = Object.values(_pluginInstalledMap[_pluginCtxKey(ctx)] || {})
     .filter(p => !q || String(p.name).toLowerCase().includes(q) || String(p.id).toLowerCase().includes(q))
@@ -2158,7 +2235,7 @@ function _renderInstalledPlugins(ctx) {
     const kind = MODDED_SOFTWARES.has(state.software) ? 'mods' : 'plugins';
     listEl.innerHTML = `<div class="plugin-state-msg">${q
       ? `No installed ${kind} match "${escapeHtml(state.query)}".`
-      : `No ${kind} installed through MCPanel yet.`}</div>`;
+      : `No ${kind} installed yet.`}</div>`;
     return;
   }
   const rows = recs.map(p => ({
@@ -2225,7 +2302,7 @@ function _renderPluginActions(r, ctx, inModal = false) {
       : `<button class="plugin-install-btn" onclick="toast('This plugin is hosted externally - check its SpigotMC resource page','info')">View Page</button>`;
   } else if (_installedPlugin(ctx, pkey)) {
     const rec = _installedPlugin(ctx, pkey);
-    inner = `<button class="plugin-install-btn" onclick="_pluginAction('update','${ctx}',this)" title="Installed: ${escapeHtml(rec.version || '?')} - update to the newest compatible version">Update</button>`
+    inner = rec.platform === 'local' ? '' : `<button class="plugin-install-btn" onclick="_pluginAction('update','${ctx}',this)" title="Installed: ${escapeHtml(rec.version || '?')} - update to the newest compatible version">Update</button>`
       + `<button class="plugin-install-btn uninstall" onclick="_pluginAction('uninstall','${ctx}',this)" title="Delete ${escapeHtml(rec.path || rec.filename)}">Uninstall</button>`;
   } else {
     inner = `<button class="plugin-install-btn" onclick="_pluginAction('install','${ctx}',this)">Install</button>`;
@@ -2247,11 +2324,14 @@ function _renderPluginRow(r, ctx, installedView = false) {
     : `<span class="plugin-meta-downloads">⬇ ${_fmtDownloads(r.downloads)}</span>
       ${r.latestVersion ? `<span class="plugin-meta-version">${escapeHtml(r.latestVersion)}</span>` : ''}
       ${r.updatedAt ? `<span class="plugin-meta-updated">${_fmtDate(r.updatedAt)}</span>` : ''}`;
-  return `<div class="plugin-row clickable" data-pkey="${escapeHtml(pkey)}" onclick="_openPluginDetails('${ctx}',this.dataset.pkey)">
+  const local = r.platform === 'local';
+  const rowAttrs = local ? 'class="plugin-row"'
+    : `class="plugin-row clickable" onclick="_openPluginDetails('${ctx}',this.dataset.pkey)"`;
+  return `<div ${rowAttrs} data-pkey="${escapeHtml(pkey)}">
     ${icon}
     <div class="plugin-info">
       <div class="plugin-name">${escapeHtml(r.name)}${externalBadge}</div>
-      <div class="plugin-author">${installedView ? 'from' : 'by'} ${escapeHtml(r.author)}</div>
+      <div class="plugin-author">${local ? 'Added manually' : `${installedView ? 'from' : 'by'} ${escapeHtml(r.author)}`}</div>
       ${r.description ? `<div class="plugin-desc">${escapeHtml(r.description)}</div>` : ''}
     </div>
     <div class="plugin-meta">
@@ -3495,9 +3575,20 @@ async function applyQuickPort() {
   if (idx !== -1) config.servers[idx].port = port;
   document.getElementById('detail-port').textContent = port;
   document.getElementById('detail-server-subtitle').textContent =
-    `${config.servers[idx].version} · ${capitalise(config.servers[idx].software)} · Port ${port}`;
+    `${serverTypeLabel(config.servers[idx])} · Port ${port}`;
   toast('Port updated', 'success');
   offerProxyPortSync(currentServerId, oldPort);
+}
+
+// A custom-java server's "version" is its Java ("Java 25"): when the Java
+// executable changes, the CLI re-reads it. Returns the new version or null.
+async function _refreshJavaVersion(id, javaPath) {
+  const srv = config.servers.find(s => s.id === id);
+  if (!srv || srv.software !== 'custom-java' || srv.javaPath === javaPath) return null;
+  try {
+    const r = await window.mcpanel.setServerJava(id, javaPath);
+    return r && r.server ? r.server.version : null;
+  } catch { return null; }
 }
 
 async function saveQuickSettings() {
@@ -3505,8 +3596,14 @@ async function saveQuickSettings() {
   const javaArgs = document.getElementById('quick-java-args').value;
   const javaPath = document.getElementById('quick-java-path').value;
   const group = document.getElementById('quick-group').value.trim() || null;
+  const newVersion = await _refreshJavaVersion(currentServerId, javaPath);
   const r = await window.mcpanel.updateServer(currentServerId, { javaArgs, javaPath, group });
   if (r.error) { toast(r.error, 'error'); return; }
+  if (newVersion) {
+    const s = config.servers.find(x => x.id === currentServerId);
+    if (s) s.version = newVersion;
+    if (s) document.getElementById('detail-server-subtitle').textContent = `${serverTypeLabel(s)} · Port ${s.port}`;
+  }
   const idx = config.servers.findIndex(s => s.id === currentServerId);
   if (idx !== -1) {
     config.servers[idx].javaArgs = javaArgs;
@@ -3533,6 +3630,8 @@ function openServerSettingsModal() {
   document.getElementById('ss-group').value = srv.group || '';
   document.getElementById('ss-java-args').value = srv.javaArgs || '';
   populateJdkSelect('ss', 'ss-java-path', srv.javaPath || 'java');
+  _showRunFileGroup('ss', srv.software);
+  document.getElementById('ss-run').value = srv.runFile || '';
   openModal('modal-server-settings');
 }
 
@@ -3559,7 +3658,11 @@ async function saveServerSettings() {
   const updates = { name, ram, storageLimit, javaArgs, javaPath, group };
   if (port) updates.port = port;
 
+  if (!(await _saveRunFile('ss'))) return;
+
   const oldPort = config.servers.find(s => s.id === currentServerId)?.port;
+  const newVersion = await _refreshJavaVersion(currentServerId, javaPath);
+  if (newVersion) updates.version = newVersion;
   const r = await window.mcpanel.updateServer(currentServerId, updates);
   if (r.error) { toast(r.error, 'error'); return; }
 
@@ -3568,7 +3671,7 @@ async function saveServerSettings() {
   const srv = config.servers[idx];
 
   document.getElementById('detail-server-name').textContent = name;
-  document.getElementById('detail-server-subtitle').textContent = `${srv.version} · ${capitalise(srv.software)} · Port ${srv.port}`;
+  document.getElementById('detail-server-subtitle').textContent = `${serverTypeLabel(srv)} · Port ${srv.port}`;
   refreshDetailStats(currentServerId);
   if (port) document.getElementById('detail-port').textContent = port;
 
@@ -3808,10 +3911,88 @@ async function openCreateServerModal() {
   updateHeapPlaceholder('cs');
   populateJdkSelect('cs', 'cs-java', 'java');
   document.getElementById('cs-dest').value = '';
+  document.getElementById('cs-run').value = '';
   updateServerDestHint('cs');
   await loadProfilesForCreate();
   openModal('modal-create-server');
   onSoftwareChange();
+}
+
+// ─── Custom software ("custom" = start script / executable, "custom-java" = any .jar)
+const CUSTOM_SOFTWARE = ['custom', 'custom-java'];
+const isCustomSoftware = sw => CUSTOM_SOFTWARE.includes(sw);
+
+// File types a custom server can use on the machine the CLI runs on (from
+// `mcpanel system`), falling back to every type until that has loaded.
+function _runFileTypes(software) {
+  if (software === 'custom-java') return ['.jar'];
+  return systemInfo?.runFileTypes?.[software] || ['.sh', '.command', '.bat', '.cmd', '.ps1', '.exe'];
+}
+
+function _runFileHint(software) {
+  return `Supported: ${_runFileTypes(software).join(', ')}`;
+}
+
+// A start script launches its own java, so MCPanel's Java settings (path,
+// arguments, heap) don't apply to "custom" servers. RAM stays: it is enforced
+// as a memory limit on everything the script starts.
+const _JAVA_FIELDS = {
+  cs: ['cs-java-select', 'cs-java-args', 'cs-heap'],
+  is: ['is-java', 'is-java-args'],
+  ss: ['ss-java-select', 'ss-java-args'],
+  quick: ['quick-java-args', 'quick-java-select'],
+  tsett: ['tsett-heap', 'tsett-java-args', 'tsett-java-select'],
+};
+function _toggleJavaFields(prefix, software) {
+  const hide = software === 'custom' || software === 'pumpkin';
+  for (const id of _JAVA_FIELDS[prefix] || []) {
+    document.getElementById(id)?.closest('.form-group, .setting-row')?.classList.toggle('hidden', hide);
+  }
+}
+
+// Shows/hides a form's run-file field. prefix: cs (create), is (import), ss (settings).
+function _showRunFileGroup(prefix, software) {
+  _toggleJavaFields(prefix, software);
+  const group = document.getElementById(`${prefix}-run-group`);
+  if (!group) return;
+  const custom = isCustomSoftware(software);
+  group.classList.toggle('hidden', !custom);
+  if (custom) document.getElementById(`${prefix}-run-hint`).textContent = _runFileHint(software);
+}
+
+// The run file goes through the CLI, which checks it exists and has the
+// right type, and stores it relative to the server folder. false = failed.
+async function _saveRunFile(prefix) {
+  const cur = config.servers.find(s => s.id === currentServerId);
+  if (!cur || !isCustomSoftware(cur.software)) return true;
+  const runFile = document.getElementById(`${prefix}-run`).value.trim();
+  if (runFile === (cur.runFile || '')) return true;
+  let rr;
+  try { rr = await window.mcpanel.setRunFile(currentServerId, runFile); }
+  catch (e) { rr = { error: e.message }; }
+  if (rr.error) { toast(rr.error, 'error'); return false; }
+  cur.runFile = rr.server ? rr.server.runFile : (runFile || null);
+  return true;
+}
+
+async function browseRunFile(prefix) {
+  const software = (prefix === 'ss' || prefix === 'tsett')
+    ? config.servers.find(s => s.id === currentServerId)?.software
+    : document.getElementById(`${prefix}-software`).value;
+  const p = await window.mcpanel.browseRunFile(software, _runFileTypes(software).map(e => e.slice(1)));
+  if (p) document.getElementById(`${prefix}-run`).value = p;
+}
+
+// Import: offer the run files the folder scan found for the picked type.
+function onImportSoftwareChange() {
+  const software = document.getElementById('is-software').value;
+  _showRunFileGroup('is', software);
+  const list = document.getElementById('is-run-list');
+  const input = document.getElementById('is-run');
+  const scan = _importFolders.length === 1 ? (_importFolders[0].scan || {}) : {};
+  const found = software === 'custom-java' ? (scan.jars || []) : software === 'custom' ? (scan.runFiles || []) : [];
+  list.innerHTML = found.map(f => `<option value="${escHtml(f)}"></option>`).join('');
+  input.value = found[0] || '';
 }
 
 async function onSoftwareChange() {
@@ -3819,6 +4000,18 @@ async function onSoftwareChange() {
   const versionSel = document.getElementById('cs-version');
   const spigotWarn = document.getElementById('cs-spigot-warning');
   spigotWarn.classList.toggle('hidden', software !== 'spigot');
+
+  // Custom servers: no version list or build options, just a run file.
+  const custom = isCustomSoftware(software);
+  _showRunFileGroup('cs', software);
+  document.getElementById('cs-version-group').classList.toggle('hidden', custom);
+  document.getElementById('cs-build-opts').classList.toggle('hidden', custom);
+  if (custom) {
+    document.getElementById('cs-spigot-jdk-warning').classList.add('hidden');
+    populateJdkSelect('cs', 'cs-java', document.getElementById('cs-java').value || 'java');
+    filterProfilesForSoftware(software);
+    return;
+  }
 
   const preReleaseEl = document.getElementById('cs-prerelease');
   const preReleaseLbl = document.getElementById('lbl-prerelease');
@@ -3831,7 +4024,7 @@ async function onSoftwareChange() {
 
   const unstableEl = document.getElementById('cs-unstable');
   const unstableLbl = document.getElementById('lbl-unstable');
-  const supportsUnstable = ['paper', 'purpur', 'folia', 'leaf', 'velocity'].includes(software);
+  const supportsUnstable = ['paper', 'purpur', 'folia', 'leaf', 'velocity', 'pumpkin'].includes(software);
   if (unstableEl) {
     unstableEl.disabled = !supportsUnstable;
     if (!supportsUnstable) unstableEl.checked = false;
@@ -3873,6 +4066,7 @@ async function onVersionChange() {
   const software = document.getElementById('cs-software').value;
   const version = document.getElementById('cs-version').value;
 
+  if (software === 'pumpkin') return;
   if (software !== 'spigot') {
     document.getElementById('cs-spigot-jdk-warning')?.classList.add('hidden');
     populateJdkSelect('cs', 'cs-java', document.getElementById('cs-java').value || 'java');
@@ -3992,7 +4186,9 @@ async function createServer() {
   const heap = document.getElementById('cs-heap').value.trim();
   const heapErr = heapError(heap, ram);
   if (heapErr) { toast(heapErr, 'error'); return; }
-  if (!version || version === 'Loading...' || version === 'Failed to load') {
+  const custom = isCustomSoftware(software);
+  const runFile = custom ? document.getElementById('cs-run').value.trim() : '';
+  if (!custom && (!version || version === 'Loading...' || version === 'Failed to load')) {
     toast('Please select a version', 'error'); return;
   }
   if (storageLimit) {
@@ -4010,7 +4206,7 @@ async function createServer() {
   openModal('modal-download');
 
   const r = await window.mcpanel.createServer({
-    name, software, version, port, ram,
+    name, software, version: custom ? null : version, runFile: runFile || null, port, ram,
     storageLimit: storageLimit || null,
     javaPath, javaArgs,
     profileId: profileId || null,
@@ -4111,7 +4307,7 @@ function openProfileOverviewTab() {
       <div class="pd-server-row">
         <div class="pd-server-info">
           <span class="pd-server-name">${escapeHtml(srv.name)}</span>
-          <span class="pd-server-meta">${escapeHtml(srv.version)} · ${escapeHtml(capitalise(srv.software))}</span>
+          <span class="pd-server-meta">${escapeHtml(serverTypeLabel(srv))}</span>
         </div>
         <button class="btn-xs" onclick="openServerDetail('${srv.id}')">Go to Server</button>
       </div>
@@ -4654,6 +4850,7 @@ function openImportServerModal() {
   document.getElementById('is-version').value = '';
   document.getElementById('is-port').value = '25565';
   document.getElementById('is-software').value = 'paper';
+  onImportSoftwareChange();
   setRamDropdown('is', '2G');
   document.getElementById('is-java').value = 'java';
   document.getElementById('is-java-args').value = '-XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200';
@@ -4664,7 +4861,7 @@ function openImportServerModal() {
 }
 
 function _importScanLabel(scan) {
-  if (scan.isServer === false) return 'No server jar found';
+  if (scan.isServer === false) return isCustomSoftware(scan.software) ? 'No server files found' : 'No server jar found';
   if (!scan.software) return 'Not detected';
   return `${capitalise(scan.software)}${scan.version ? ' ' + scan.version : ''}${scan.port ? ' · port ' + scan.port : ''}`;
 }
@@ -4679,6 +4876,7 @@ function _applyImportScan(entry) {
   // (e.g. a Minecraft version on a Velocity proxy) would be wrong.
   document.getElementById('is-version').value = scan.version || '';
   if (scan.ram) setRamDropdown('is', scan.ram);
+  onImportSoftwareChange();
 }
 
 function renderImportFolders() {
@@ -4751,13 +4949,17 @@ async function importServer() {
     folderPath: f.path,
     name: f.name.trim(),
     software: f.scan.software || 'paper',
-    version: f.scan.version || 'Unknown',
+    // Custom: the CLI auto-detects the run file and labels the version.
+    version: f.scan.version || (isCustomSoftware(f.scan.software) ? '' : 'Unknown'),
     port: parseInt(f.scan.port) || 25565,
   } : {
     folderPath: f.path,
     name: document.getElementById('is-name').value.trim(),
     software: document.getElementById('is-software').value,
-    version: document.getElementById('is-version').value.trim() || 'Unknown',
+    version: document.getElementById('is-version').value.trim()
+      || (isCustomSoftware(document.getElementById('is-software').value) ? '' : 'Unknown'),
+    runFile: isCustomSoftware(document.getElementById('is-software').value)
+      ? document.getElementById('is-run').value.trim() : '',
     port: parseInt(document.getElementById('is-port').value) || 25565,
   });
   if (jobs.some(j => !j.name)) { toast(multi ? 'Please enter a name for every server' : 'Please enter a server name', 'error'); return; }
@@ -5426,7 +5628,10 @@ function toast(msg, type = 'info', opts = {}) {
   return { el, close };
 }
 
-function capitalise(s) { return s ? s[0].toUpperCase() + s.slice(1) : s; }
+function capitalise(s) {
+  if (s === 'custom-java') return 'Custom';
+  return s ? s[0].toUpperCase() + s.slice(1) : s;
+}
 
 // ─── Context menu ─────────────────────────────────────────────────────────────
 // showContextMenu(event, items, { title }) replaces the browser's right-click
@@ -5809,7 +6014,27 @@ let _termFit = null;
 let _ptyUnlisten = null;
 let _ptyClosedUnlisten = null;
 
+let _terminalMaximized = false;
+try { _terminalMaximized = localStorage.getItem('terminalMaximized') === '1'; } catch {}
+
+function _applyTerminalMaximize() {
+  const modal = document.querySelector('#modal-terminal .terminal-modal');
+  const btn = document.getElementById('terminal-maximize');
+  if (!modal) return;
+  modal.classList.toggle('maximized', _terminalMaximized);
+  if (btn) btn.title = _terminalMaximized ? 'Restore terminal size' : 'Enlarge terminal';
+  if (_termFit) requestAnimationFrame(() => _termFit && _termFit.fit());
+}
+
+function toggleTerminalMaximize() {
+  _terminalMaximized = !_terminalMaximized;
+  try { localStorage.setItem('terminalMaximized', _terminalMaximized ? '1' : '0'); } catch {}
+  _applyTerminalMaximize();
+  if (_term) _term.focus();
+}
+
 async function openTerminal() {
+  _applyTerminalMaximize();
   openModal('modal-terminal');
   const container = document.getElementById('terminal-container');
 

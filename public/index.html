@@ -644,6 +644,14 @@
                       <button class="btn-sm" onclick="browseJavaTabSettings()">Browse</button>
                     </div>
                   </div>
+                  <div class="form-group full hidden" id="tsett-run-group">
+                    <label>Run File</label>
+                    <div class="input-row">
+                      <input type="text" id="tsett-run" class="input" placeholder="Auto-detect">
+                      <button class="btn-sm" onclick="browseRunFile('tsett')">Browse</button>
+                    </div>
+                    <div class="field-hint" id="tsett-run-hint"></div>
+                  </div>
                 </div>
                 <!-- Proxy link button (Paper/Purpur/Folia/Leaf only) -->
                 <div id="tsett-proxy-btn-row" class="hidden" style="margin-top:16px">
@@ -1299,10 +1307,6 @@
               <span id="cli-update-status-text" style="font-size:12px;color:var(--text-muted)">MCPanel-CLI: -</span>
             </div>
           </div>
-          <div class="info-box" style="margin-top:12px">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;margin-top:2px"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
-            <span>Soon, all MCPanel products will move to <strong>github.com/MCPanel-Studios</strong>. Updates keep working through the move.</span>
-          </div>
         </div>
         <div class="settings-section">
           <h3>BuildTools</h3>
@@ -1457,15 +1461,26 @@
             <option value="fabric">Fabric</option>
             <option value="velocity">Velocity</option>
             <option value="spigot" id="cs-opt-spigot">Spigot</option>
+            <option value="pumpkin">Pumpkin (Rust, experimental)</option>
+            <option value="custom">Custom (run file)</option>
+            <option value="custom-java">Custom Java (.jar)</option>
           </select>
         </div>
-        <div class="form-group">
+        <div class="form-group" id="cs-version-group">
           <label>Version</label>
           <select id="cs-version" class="input" onchange="onVersionChange()">
             <option>Loading...</option>
           </select>
         </div>
-        <div class="form-group full" style="display:flex;flex-direction:column;gap:7px;padding:2px 0">
+        <div class="form-group full hidden" id="cs-run-group">
+          <label>Run File <span class="label-hint">(optional)</span></label>
+          <div class="input-row">
+            <input type="text" id="cs-run" class="input" placeholder="None - add it to the server folder later">
+            <button class="btn-sm" onclick="browseRunFile('cs')">Browse</button>
+          </div>
+          <div class="field-hint" id="cs-run-hint"></div>
+        </div>
+        <div class="form-group full" id="cs-build-opts" style="display:flex;flex-direction:column;gap:7px;padding:2px 0">
           <label class="checkbox-item" id="lbl-prerelease">
             <input type="checkbox" id="cs-prerelease" onchange="onSoftwareChange()">
             Include snapshots &amp; pre-releases
@@ -1474,7 +1489,7 @@
           <label class="checkbox-item" id="lbl-unstable">
             <input type="checkbox" id="cs-unstable" onchange="onSoftwareChange()">
             Include unstable builds
-            <span style="opacity:0.55;font-size:11px">(Paper, Purpur, Folia, Leaf, Velocity)</span>
+            <span style="opacity:0.55;font-size:11px">(Paper, Purpur, Folia, Leaf, Velocity, Pumpkin)</span>
           </label>
         </div>
         <div class="form-group">
@@ -1804,7 +1819,7 @@
         </div>
         <div class="form-group is-single-only">
           <label>Software</label>
-          <select id="is-software" class="input">
+          <select id="is-software" class="input" onchange="onImportSoftwareChange()">
             <option value="paper">Paper</option>
             <option value="purpur">Purpur</option>
             <option value="folia">Folia</option>
@@ -1813,11 +1828,23 @@
             <option value="fabric">Fabric</option>
             <option value="velocity">Velocity</option>
             <option value="spigot">Spigot</option>
+            <option value="pumpkin">Pumpkin (Rust, experimental)</option>
+            <option value="custom">Custom (run file)</option>
+            <option value="custom-java">Custom Java (.jar)</option>
           </select>
         </div>
         <div class="form-group is-single-only">
           <label>Version</label>
           <input type="text" id="is-version" class="input" placeholder="e.g. 1.21.4">
+        </div>
+        <div class="form-group full is-single-only hidden" id="is-run-group">
+          <label>Run File <span class="label-hint">(optional)</span></label>
+          <div class="input-row">
+            <input type="text" id="is-run" class="input" list="is-run-list" placeholder="Auto-detect">
+            <datalist id="is-run-list"></datalist>
+            <button class="btn-sm" onclick="browseRunFile('is')">Browse</button>
+          </div>
+          <div class="field-hint" id="is-run-hint"></div>
         </div>
         <div class="form-group is-single-only">
           <label>Port</label>
@@ -1963,6 +1990,14 @@
             <input type="text" id="ss-java-path" class="input" placeholder="java">
             <button class="btn-sm" onclick="browseJavaSettings()">Browse</button>
           </div>
+        </div>
+        <div class="form-group full hidden" id="ss-run-group">
+          <label>Run File</label>
+          <div class="input-row">
+            <input type="text" id="ss-run" class="input" placeholder="Auto-detect">
+            <button class="btn-sm" onclick="browseRunFile('ss')">Browse</button>
+          </div>
+          <div class="field-hint" id="ss-run-hint"></div>
         </div>
       </div>
       <div class="server-tools">
@@ -2192,9 +2227,15 @@
   <div class="modal large file-editor-modal">
     <div class="modal-header">
       <h2 id="file-editor-title">Edit File</h2>
-      <button class="modal-close" onclick="closeModal('modal-file-editor')">
+      <div class="file-editor-actions">
+        <button class="modal-close modal-maximize" id="file-editor-maximize" onclick="toggleFileEditorMaximize()" title="Enlarge editor">
+          <svg class="icon-expand" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+          <svg class="icon-shrink" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/></svg>
+        </button>
+        <button class="modal-close" onclick="closeModal('modal-file-editor')">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
-      </button>
+        </button>
+      </div>
     </div>
     <div class="modal-body file-editor-body">
       <div id="file-editor-content" class="file-editor-ace"></div>
@@ -2264,7 +2305,13 @@
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
         Terminal - MCPanel-WebUI
       </span>
-      <button class="terminal-close-btn" onclick="closeTerminal()">×</button>
+      <div class="terminal-modal-actions">
+        <button class="terminal-close-btn terminal-maximize-btn" id="terminal-maximize" onclick="toggleTerminalMaximize()" title="Enlarge terminal">
+          <svg class="icon-expand" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+          <svg class="icon-shrink" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/></svg>
+        </button>
+        <button class="terminal-close-btn" onclick="closeTerminal()">×</button>
+      </div>
     </div>
     <div id="terminal-container" class="terminal-body"></div>
   </div>

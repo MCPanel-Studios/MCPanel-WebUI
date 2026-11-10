@@ -1350,6 +1350,12 @@ body {
 .modal.danger .first-start-sub { color: var(--toast-error-text); }
 .modal.danger .first-start-footer { border-top-color: var(--toast-error-border); }
 .file-editor-modal { height: 78vh; max-height: 78vh; }
+.file-editor-modal.maximized { width: calc(100vw - 32px); max-width: calc(100vw - 32px); height: calc(100vh - 32px); max-height: calc(100vh - 32px); }
+.file-editor-actions { display: flex; align-items: center; gap: 6px; }
+.modal-maximize:hover { background: var(--bg-elevated); color: var(--text-primary); border-color: var(--border); }
+.modal-maximize .icon-shrink { display: none; }
+.file-editor-modal.maximized .modal-maximize .icon-shrink { display: block; }
+.file-editor-modal.maximized .modal-maximize .icon-expand { display: none; }
 .file-editor-body { display: flex; flex-direction: column; padding: 14px 16px; min-height: 0; }
 .file-editor-ace {
   flex: 1; min-height: 0; position: relative;
@@ -1362,6 +1368,8 @@ body {
   font-family: var(--font-mono) !important;
   font-size: 12px !important;
   line-height: 1.6 !important;
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
   border-radius: var(--radius-sm);
 }
 @keyframes slideUp {
@@ -1743,6 +1751,12 @@ select option { background: #1a1a2a; color: var(--text-primary); }
   transition: background .12s, color .12s;
 }
 .terminal-close-btn:hover { background: var(--red-dim); color: var(--red); }
+.terminal-modal.maximized { width: calc(100vw - 32px); height: calc(100vh - 32px); }
+.terminal-modal-actions { display: flex; align-items: center; gap: 4px; }
+.terminal-maximize-btn:hover { background: var(--bg-surface); color: var(--text-primary); }
+.terminal-maximize-btn .icon-shrink { display: none; }
+.terminal-modal.maximized .terminal-maximize-btn .icon-shrink { display: block; }
+.terminal-modal.maximized .terminal-maximize-btn .icon-expand { display: none; }
 .terminal-body {
   flex: 1; overflow: hidden; padding: 4px;
   background: var(--console-bg);
